@@ -6,17 +6,21 @@ Miscellanious data analytics and prompting:
 
 ## Index data formatter
 
-Input: index or stock or list of stocks, two dates  
+Input: index or stock or list of stocks, two dates
+
 Workflow:
-- Downloads stock data of the period between the two dates from Yahoo! Finance API
-- Cleans data
+- Downloads stock data from the period between the two dates from Yahoo! Finance API
+- Cleans the data
+
 Output: csv file
 
 ## Options data formatter
 
-Input: index or stock or list of stocks, two dates  
+Input: index or stock or list of stocks, two dates
+
 Workflow:
-- Downloads data of the period between the two dates from Yahoo! Finance API
+- Downloads data from the period between the two dates from Yahoo! Finance API
 - Cleans data
 - Checks non-arbitrage conditions and cleans data appropriately
+
 Output: csv file
