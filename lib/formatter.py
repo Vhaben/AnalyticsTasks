@@ -7,6 +7,12 @@ import yfinance as yf
 from pytickersymbols import PyTickerSymbols
 from scipy import interpolate
 
+import logging
+
+# logger = logging.getLogger('yfinance')
+# logger.disabled = True
+# logger.propagate = False
+
 stock_data = PyTickerSymbols()
 listed_indices = stock_data.get_all_indices()
 
@@ -66,154 +72,159 @@ def valid_tickers(ticker_list, text_out=1):
             print("Only keeping valid tickers.")
     return new_list, invalid
 
-
-def yes_no(question="Y/N"):
-    while True:
-        user_input = input(question)
-        if user_input.lower()[0] == "y":
-            answ = 1
-            break
-        elif user_input.lower()[0] == "n":
-            answ = 0
-            break
-        else:
-            print("Invalid input. Please enter yes/no.")
-    return answ
-
-
-def stocks_in_index(index, info_name):
-    index_tickers = []
-    yf_ticker = yf.Ticker(index)
-    name = yf_ticker.info[info_name]
-    index_stock_data = stock_data.get_stocks_by_index(name)
-    lost_tickers = []
-    for company in index_stock_data:
-        symbol_list = company['symbols']
-        symb = company['symbol']
-        if symb is not None:
-            valid_tick, lost = valid_tickers([symb], 0)
-            if len(valid_tick) != 0:
-                index_tickers.append(valid_tick[0])  # 'symbol' is valid for YFinance
-        elif len(symbol_list) != 0 and (symb is None or len(valid_tick) == 0):  # 'symbol' not valid, so check 'symbols'
-            for inner_dict in symbol_list:
-                valid_tick = valid_tickers([inner_dict['yahoo']], 0)[0]
-                if len(valid_tick) != 0:  # Found valid ticker in 'symbols'
-                    index_tickers.append(valid_tick[0])
-                    break
-        if symb is not None and len(valid_tick) == 0:  # If didn't find any valid YF symbol for this stock
-            lost_tickers.append(lost[0])
-            print(f"{lost[0]} not found.")
-    return index_tickers, lost_tickers
-
-
-def unpack_index(index):
-    global listed_indices
-    yf_ticker = yf.Ticker(index)
-    info = yf_ticker.info
-    info_keys = info.keys()
-    if "shortName" not in info_keys and "longName" not in info_keys:
-        print(f"Cannot find stocks in {index}.")
-        return None, None
-    elif "shortName" in info_keys and info["shortName"] in listed_indices:
-        return stocks_in_index(index, "shortName")
-    elif "longName" in info_keys and info["longName"] in listed_indices:
-        return stocks_in_index(index, "longName")
-    else:
-        print(f"Cannot find stocks in {index}.")
-        return None, None
-
-
 def df_cleaning(df):
-    df.dropna(how='all', axis=1, inplace=True)
-    df.dropna(how='all', axis=0, inplace=True)
+    # removed_stocks=[col for col in df.columns if df[col].isna().all()])
+    df = df.dropna(how='all', axis=1)
+    df = df.dropna(how='all', axis=0)
     # empty_cells = list(zip(np.where(pd.isnull(df))))
-    df.interpolate(method='cubicspline')
-    tickers = df.index.unique()
+    df.astype(float).interpolate(method='cubicspline')
+    # ticker_level=len(df.columns.levels)-2 # Level of stock tickers in multi-index columns
+    tickers = pd.MultiIndex.from_tuples([tuple(col[:-1]) for col in df.columns]).unique()
+    # print(tickers)
     for ticker in tickers:
-        # wrong_highs=np.where(df[ticker]["High"] <= max(df[ticker]["Open"], df[ticker]["Close"]))
-        # wrong_lows=np.where(df[ticker]["Low"] >= max(df[ticker]["Open"], df[ticker]["Close"]))
-        df.loc[df[ticker]["High"] <= max(df[ticker]["Open"], df[ticker]["Close"]),"High"] =np.nan
-        df.loc[df[ticker]["Low"] >= max(df[ticker]["Open"], df[ticker]["Close"]),"Low"] =np.nan
-    df.interpolate(method='cubicspline')
+        df.loc[df[ticker + ("High",)] <= df[[ticker + ("Open",), ticker + ("Close",)]].max(axis=1), ticker + (
+        "High",)] = np.nan
+        df.loc[df[ticker + ("Low",)] >= df[[ticker + ("Open",), ticker + ("Close",)]].max(axis=1), ticker + (
+        "Low",)] = np.nan
+    df.astype(float).interpolate(method='cubicspline')
     return df
 
+
+class YfInput:
+    def __init__(self,symbol:str):
+        self.symbol=symbol
+
+    def valid_ticker(self, text_out=1):
+        yf_ticker = yf.Ticker(self.symbol)
+        # Slower method
+        # yf_ticker.history(start="2024-06-01", end="2024-06-15")
+        # error_message = yf.shared._ERRORS[ticker.upper()]
+        # if "delisted" in error_message:
+        #     print(f"{ticker} not a valid ticker.")
+        info = yf_ticker.info
+        if len(info) == 1:
+            if text_out == 1:
+                print(f"{self.symbol} not a valid ticker.")
+            return False
+        else:
+            if text_out==1:
+                print(f"{self.symbol} valid.")
+            return True
+
+class Index(YfInput):
+    def stocks_in_index(self, info_name, text_out=1):
+        # Returns:
+        # - index_tickers: list of Stock objects
+        # - lost_tickers: list of strings (invalid tickers)
+        index_tickers = []
+        yf_ticker = yf.Ticker(self.symbol)
+        name = yf_ticker.info[info_name]
+        index_stock_data = stock_data.get_stocks_by_index(name)
+        if self.symbol=="^DJI":
+            index_stock_data=stock_data.get_stocks_by_index("DOW JONES")
+        lost_tickers = []
+        for company in index_stock_data:
+            symbol_list = company['symbols']
+            symbol=company['symbol']
+            valid=False
+            if symbol is not None:
+                stock_symb = Stock(company['symbol'])
+                valid = stock_symb.valid_ticker(0)
+                if valid:
+                    index_tickers.append(stock_symb)  # 'symbol' is valid for YFinance
+            if len(symbol_list) != 0 and (
+                    symbol is None or not valid):  # 'symbol' not valid, so check 'symbols'
+                for inner_dict in symbol_list:
+                    stock_symb=Stock(inner_dict['yahoo'])
+                    valid = stock_symb.valid_ticker(0)
+                    if valid:  # Found valid ticker in 'symbols'
+                        index_tickers.append(stock_symb)
+                        break
+            if not valid:  # If didn't find any valid YF symbol for this stock
+                if symbol is not None:
+                    lost_tickers.append(symbol)
+                    if text_out==1:
+                        print(f"{symbol} not found.")
+                else:
+                    lost_tickers.append(company)
+        return index_tickers, lost_tickers
+
+
+    def unpack_index(self):
+        global listed_indices
+        yf_ticker = yf.Ticker(self.symbol)
+        info = yf_ticker.info
+        info_keys = info.keys()
+        if "shortName" not in info_keys and "longName" not in info_keys:
+            print(f"Cannot find stocks in {self.symbol}.")
+            return None, None
+        elif "shortName" in info_keys and info["shortName"] in listed_indices:
+            return self.stocks_in_index("shortName",0)
+        elif "longName" in info_keys and info["longName"] in listed_indices:
+            return self.stocks_in_index("longName",0)
+        elif len([_ for _ in listed_indices if re.findall("[a-zA-Z^]+", info["shortName"].upper())[0] in _])!=0:
+            # Find closest matching name
+            return self.stocks_in_index("shortName", 0)
+        else:
+            print(f"Cannot find stocks in {self.symbol}.")
+            return None, None
+
+
+class Stock(YfInput):
+    pass
+
 class DataToFormat:
-    def __init__(self, tickers, start_date, end_date):
+    def __init__(self, tickers, start_date="", end_date=""):
         self.ticker_list, self.ticker_str = ticker_formatter(tickers)
-        self.ticker_list = valid_tickers(self.ticker_list)[0]
+        # Ticker validation
+        # self.ticker_list = valid_tickers(self.ticker_list)[0]
         self.ticker_str = ", ".join(self.ticker_list)
-        print(self.ticker_list)
         self.start_date = date_formatter(start_date)
         self.end_date = date_formatter(end_date)
-        self.indices = [ticker for ticker in self.ticker_list if "^" in ticker]
+        self.ticker_types=[Index(_) if "^" in _ else Stock(_) for _ in self.ticker_list]
+        self.indices = [_ for _ in self.ticker_types if isinstance(_,Index)]
 
     def __str__(self):
         return f"{self.ticker_str} data between {self.start_date} and {self.end_date}"
 
-    def pandas_tickers(self):  # Return data of inputted tickers only
-        data = yf.download(self.ticker_str, start=self.start_date, end=self.end_date, group_by='tickers')
-        return data
+    def pandas_tickers(self,text_out=1):  # Return data of inputted tickers only
+        failed_tickers=[]
+        all_data=pd.DataFrame()
+        for ticker in self.ticker_types:
+            data=yf.download(ticker.symbol, start=self.start_date, end=self.end_date, group_by='tickers')
+            if data.empty:
+                failed_tickers.append(ticker)
+                if text_out==1:
+                    print(f"Ticker {ticker.symbol} failed.")
+            else:
+                data.columns = pd.MultiIndex.from_tuples([(ticker.symbol, _) for _ in data.columns])
+                all_data=pd.concat([all_data,data],axis=1)
+        # data = yf.download(self.ticker_str, start=self.start_date, end=self.end_date, group_by='tickers')
+        return all_data
 
     def pandas_index_stocks(self):  # Return data of stocks in indices entered only
         total_tickers = {}
         all_data = pd.DataFrame()
         for index in self.indices:
-            index_tickers, lost_tickers = unpack_index(index)
+            index_tickers, lost_tickers = index.unpack_index()
             if index_tickers is not None and len(index_tickers) != 0:
-                total_tickers[index] = index_tickers
-                tickers_str = ", ".join(index_tickers)
+                total_tickers[index.symbol] = index_tickers
+                tickers_str = ", ".join([_.symbol for _ in index_tickers])
+                # print(tickers_str)
                 data = yf.download(tickers_str, start=self.start_date, end=self.end_date, group_by='tickers')
-                data.columns = pd.MultiIndex.from_tuples([(index,) + _ for _ in data.columns])
+                data.columns = pd.MultiIndex.from_tuples([(index.symbol,) + _ for _ in data.columns])
                 all_data = pd.concat([all_data, data], axis=1)
         if not all_data.empty:
             return all_data
 
     def csv_output(self, func):
         data = func()
-        namel = self.ticker_list + [self.start_date, self.end_date]
-        name = '_'.join(namel) + ".csv"
-        print(data)
-        if data is not None and not data.empty:
-            return data.to_csv(name)
+        if data is not None:
+            namel = self.ticker_list + [self.start_date, self.end_date]
+            name = '_'.join(namel) + ".csv"+func.__name__
+            if not data.empty:
+                return data.to_csv(name)
 
-
-def user_input():
-    ticker_list, ticker_str = ticker_formatter(input("Input tickers:"))
-    print(f"Inputted tickers: {ticker_list}")
-    ticker_list = valid_tickers(ticker_list)[0]
-    print(f"Valid tickers: {ticker_list}")
-    while True:
-        start_date = date_formatter(input("Enter start date:"))
-        if "-" in start_date:
-            break
-        else:
-            print("Invalid.")
-    while True:
-        end_date = date_formatter(input("Enter end date:"))
-        if "-" in end_date:
-            break
-        else:
-            print("Invalid.")
-    return ticker_str, start_date, end_date
-
-
-def csv_input(csv):
-    return pd.read_csv(csv)
-
-
-index_stock_data = stock_data.get_stocks_by_index("S&P 500")
-# print([_["symbols"] for _ in index_stock_data])
-
-j = DataToFormat("^GSPC", "2020-01-01", "2020-01-15")
-j.csv_output(j.pandas_index_stocks)
-
-
-class Index:
-    pass
-
-
-class Stock:
-    pass
 
 # nasdaq_tickers = stock_data.get_stocks_by_index('NASDAQ 100')  # Corrected index name
 
@@ -226,25 +237,6 @@ class Stock:
 #    ),
 #    dir(stock_data),
 # ))
+
 # print(all_ticker_getter_names)
 # print(stock_data.get_dow_jones_london_yahoo_tickers())
-
-#
-# indices=[ticker for ticker in ticker_list if "^" in ticker]
-#
-# for index in indices:
-#     yf_ticker=yf.Ticker(index)
-#     info=yf_ticker.info
-#     info_keys=yf_ticker.info.keys()
-#     if "shortName" not in info_keys and "longName" not in info_keys:
-#         print(f"Cannot find stocks in {index}.")
-#     elif "shortName" in info_keys and yf_ticker.info["shortName"] in listed_indices:
-#         s_name=yf_ticker.info["shortName"]
-#         index_stock_data = stock_data.get_stocks_by_index(s_name)
-#         index_tickers=[stock['symbol'] for stock in index_stock_data]
-#     elif "longName" in info_keys and yf_ticker.info["longName"] in listed_indices:
-#         l_name=yf_ticker.info["longName"]
-#         index_stock_data = stock_data.get_stocks_by_index(s_name)
-#         index_tickers = [stock['symbol'] for stock in index_stock_data]
-#     else:
-#         print(f"Cannot find stocks in {index}.")
