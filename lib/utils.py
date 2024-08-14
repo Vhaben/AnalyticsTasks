@@ -1,8 +1,71 @@
 import re
 import requests
+import datetime
+import itertools
+
 
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+
+import yfinance as yf
+
+
+def date_formatter(date):
+    datelist = re.findall("[0-9]+", date)
+    if len(datelist) != 3 or (len(datelist[0]) != 4 and len(datelist[2]) != 4):
+        return "Invalid date format."
+    if len(datelist[0]) == 4:
+        date = "-".join(datelist)
+    elif len(datelist[2]) == 4:
+        date = datelist[2] + "-" + datelist[1] + "-" + datelist[0]
+    try:
+        datetime.datetime.strptime(date, "%Y-%m-%d")
+    except:
+        return "Date numbers invalid."
+    return date
+
+
+def ticker_formatter(tickers):
+    ticker_list = []
+    ticker_str = ""
+    if not isinstance(tickers, list) and not isinstance(tickers, str):
+        return "Invalid ticker input."
+    if isinstance(tickers, list):
+        ticker_str = (", ".join(tickers)).upper()
+        ticker_list = tickers
+    elif isinstance(tickers, str):
+        ticker_list = re.findall("[a-zA-Z^]+", tickers.upper())
+        ticker_str = ", ".join(ticker_list)
+    return ticker_list, ticker_str
+
+
+def valid_tickers(ticker_list, text_out=1):
+    new_list = []
+    invalid = []
+    for ticker in ticker_list:
+        yf_ticker = yf.Ticker(ticker)
+
+        # Slower method
+        # yf_ticker.history(start="2024-06-01", end="2024-06-15")
+        # error_message = yf.shared._ERRORS[ticker.upper()]
+        # if "delisted" in error_message:
+        #     print(f"{ticker} not a valid ticker.")
+
+        info = yf_ticker.info
+        if len(info) == 1:
+            if text_out == 1:
+                print(f"{ticker} not a valid ticker.")
+            invalid.append(ticker)
+        else:
+            new_list.append(ticker)
+    if text_out == 1:
+        if len(new_list) == 0:
+            print("No valid tickers.")
+        else:
+            print("Only keeping valid tickers.")
+    return new_list, invalid
+
 
 def yes_no(question="Y/N?"):
     while True:
@@ -37,6 +100,7 @@ def user_input():
         else:
             print("Invalid.")
     return ticker_str, start_date, end_date
+
 
 def csv_input(csv_path, index_stocks=0):
     # Read the CSV file. The file has multi-level headers, hence header=[0, 1].

@@ -1,11 +1,4 @@
-import re
-import requests
-
-import datetime
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import yfinance as yf
 import yahooquery as yq
 from pytickersymbols import PyTickerSymbols
 from scipy import interpolate
@@ -16,90 +9,19 @@ logger = logging.getLogger('yfinance')
 logger.disabled = True
 logger.propagate = False
 
+from utils import *
+
 stock_data = PyTickerSymbols()
 listed_indices = stock_data.get_all_indices()
-
-
-def date_formatter(date):
-    datelist = re.findall("[0-9]+", date)
-    if len(datelist) != 3 or (len(datelist[0]) != 4 and len(datelist[2]) != 4):
-        return "Invalid date format."
-    if len(datelist[0]) == 4:
-        date = "-".join(datelist)
-    elif len(datelist[2]) == 4:
-        date = datelist[2] + "-" + datelist[1] + "-" + datelist[0]
-    try:
-        datetime.datetime.strptime(date, "%Y-%m-%d")
-    except:
-        return "Date numbers invalid."
-    return date
-
-
-def ticker_formatter(tickers):
-    ticker_list = []
-    ticker_str = ""
-    if not isinstance(tickers, list) and not isinstance(tickers, str):
-        return "Invalid ticker input."
-    if isinstance(tickers, list):
-        ticker_str = (", ".join(tickers)).upper()
-        ticker_list = tickers
-    elif isinstance(tickers, str):
-        ticker_list = re.findall("[a-zA-Z^]+", tickers.upper())
-        ticker_str = ", ".join(ticker_list)
-    return ticker_list, ticker_str
-
-
-def valid_tickers(ticker_list, text_out=1):
-    new_list = []
-    invalid = []
-    for ticker in ticker_list:
-        yf_ticker = yf.Ticker(ticker)
-
-        # Slower method
-        # yf_ticker.history(start="2024-06-01", end="2024-06-15")
-        # error_message = yf.shared._ERRORS[ticker.upper()]
-        # if "delisted" in error_message:
-        #     print(f"{ticker} not a valid ticker.")
-
-        info = yf_ticker.info
-        if len(info) == 1:
-            if text_out == 1:
-                print(f"{ticker} not a valid ticker.")
-            invalid.append(ticker)
-        else:
-            new_list.append(ticker)
-    if text_out == 1:
-        if len(new_list) == 0:
-            print("No valid tickers.")
-        else:
-            print("Only keeping valid tickers.")
-    return new_list, invalid
-
-
-def df_cleaning(df):
-    # removed_stocks=[col for col in df.columns if df[col].isna().all()])
-    df = df.dropna(how='all', axis=1)
-    df = df.dropna(how='all', axis=0)
-    # empty_cells = list(zip(np.where(pd.isnull(df))))
-    df.astype(float).interpolate(method='cubicspline')
-    # ticker_level=len(df.columns.levels)-2 # Level of stock tickers in multi-index columns
-    tickers = pd.MultiIndex.from_tuples([tuple(col[:-1]) for col in df.columns]).unique()
-    # print(tickers)
-    for ticker in tickers:
-        df.loc[df[ticker + ("High",)] <= df[[ticker + ("Open",), ticker + ("Close",)]].max(axis=1), ticker + (
-            "High",)] = np.nan
-        df.loc[df[ticker + ("Low",)] >= df[[ticker + ("Open",), ticker + ("Close",)]].max(axis=1), ticker + (
-            "Low",)] = np.nan
-    df.astype(float).interpolate(method='cubicspline')
-    return df
 
 
 class YfInput:
     def __init__(self, symbol: str):
         self.symbol = symbol
+        self.yf_ticker = yf.Ticker(self.symbol)
 
     def valid_ticker(self, text_out=1):
-        yf_ticker = yf.Ticker(self.symbol)
+        yf_ticker = self.yf_ticker
         # Slower method
         # yf_ticker.history(start="2024-06-01", end="2024-06-15")
         # error_message = yf.shared._ERRORS[ticker.upper()]
@@ -167,9 +89,9 @@ class Index(YfInput):
             symbol_list = company['symbols']
             symbol = company['symbol']
             valid = False
-            print("-------------------------------------")
-            print(symbol)
-            print(symbol_list)
+            # print("-------------------------------------")
+            # print(symbol)
+            # print(symbol_list)
             if symbol is not None:
                 stock_symb = Stock(company['symbol'])
                 valid = stock_symb.valid_ticker(0)
@@ -191,8 +113,8 @@ class Index(YfInput):
                         print(f"{symbol} not found.")
                 else:
                     lost_tickers.append(company)
-        print("Lost:", lost_tickers)
-        print("Found:", index_tickers)
+        # print("Lost:", lost_tickers)
+        # print("Found:", index_tickers)
         return index_tickers, lost_tickers
 
     def unpack_index(self):
@@ -201,7 +123,7 @@ class Index(YfInput):
             return wiki_tickers, []
         else:
             global listed_indices
-            yf_ticker = yf.Ticker(self.symbol)
+            yf_ticker = self.yf_ticker
             info = yf_ticker.info
             info_keys = info.keys()
             if "shortName" in info_keys and info["shortName"] in listed_indices:
@@ -219,6 +141,62 @@ class Index(YfInput):
 
 class Stock(YfInput):
     pass
+
+
+class Option(YfInput):
+    def __init__(self, symbol: str):
+        super().__init__(symbol)
+        self.expiration_dates = self.yf_ticker.options
+        try:
+            self.currency=self.yf_ticker.option_chain()[-1]['currency']
+        except:
+            self.currency=None
+
+
+    def options_expiration(self):
+        if len(self.expiration_dates) == 0:
+            return None
+        else:
+            df_list = []
+            for exp_date in self.expiration_dates:
+                opt_chain = self.yf_ticker.option_chain(exp_date)
+                calls = opt_chain.calls
+                puts = opt_chain.puts
+                calls.set_index('strike',inplace=True)
+                puts.set_index('strike',inplace=True)
+
+                # ! Check calculation
+                time_to_mat=(datetime.datetime.strptime(exp_date,"%Y-%m-%d") - datetime.datetime.today()).total_seconds() / (24 * 60 * 60) / 365
+
+                # Add optionType column
+                # calls['optionType'] = 'C'
+                # puts['optionType'] = 'P'
+
+                # Merge calls and puts into a single dataframe
+                options = pd.concat(objs=[calls, puts],axis=1,keys=['Call','Put'],)
+                options.drop(
+                    columns=list(itertools.product(['Call', 'Put'], ['contractSize', 'currency', 'change', 'percentChange', 'lastTradeDate',
+                                             'lastPrice'])),
+                    inplace = True)
+                options['expirationDate'] = exp_date
+                options['expirationDate'] = pd.to_datetime(options['expirationDate'])
+
+                # ! Check calculation
+                options['timeToMaturity'] = (options[
+                                                    'expirationDate'] - pd.Timestamp.today().normalize()).dt.days / 365
+                options.columns = pd.MultiIndex.from_tuples([(time_to_mat, ) + _ for _ in options.columns])
+                df_list.append(options)
+            options_df = pd.concat(df_list,axis=1)
+            options_df.sort_index(inplace=True)
+            return options_df
+
+    def risk_free_rate(self):
+        if self.currency is not None:
+            if self.currency=='USD':
+                pass
+
+    def arbitrage_conditions(self):
+        pass
 
 
 class DataToFormat:
@@ -251,7 +229,7 @@ class DataToFormat:
         # data = yf.download(self.ticker_str, start=self.start_date, end=self.end_date, group_by='tickers')
         return all_data
 
-    def pandas_index_stocks(self):
+    def pandas_index_components(self):
         # Return data of stocks in indices entered only
         total_tickers = {}
         all_data = pd.DataFrame()
@@ -267,34 +245,43 @@ class DataToFormat:
         if not all_data.empty:
             return all_data
 
-    def csv_output(self, func):
-        data = func()
+    def df_cleaning(self, func):
+        # removed_stocks=[col for col in df.columns if df[col].isna().all()])
+        df = func()
+        df = df.dropna(how='all', axis=1)
+        df = df.dropna(how='all', axis=0)
+        # empty_cells = list(zip(np.where(pd.isnull(df))))
+        df.astype(float).interpolate(method='cubicspline')
+        # ticker_level=len(df.columns.levels)-2 # Level of stock tickers in multi-index columns
+        tickers = pd.MultiIndex.from_tuples([tuple(col[:-1]) for col in df.columns]).unique()
+        # print(tickers)
+        for ticker in tickers:
+            df.loc[df[ticker + ("High",)] <= df[[ticker + ("Open",), ticker + ("Close",)]].max(axis=1), ticker + (
+                "High",)] = np.nan
+            df.loc[df[ticker + ("Low",)] >= df[[ticker + ("Open",), ticker + ("Close",)]].max(axis=1), ticker + (
+                "Low",)] = np.nan
+        df.astype(float).interpolate(method='cubicspline')
+        return df
+
+    def csv_output(self, func, cleaning=1):
+        if cleaning == 0:
+            data = func()
+        else:
+            data = self.df_cleaning(func)
         print(data)
         if data is not None:
             namel = self.ticker_list + [self.start_date, self.end_date]
-            name = '_'.join(namel) + func.__name__ + ".csv"
+            name = '_'.join(namel) + "_" + func.__name__ + ".csv"
             if not data.empty:
                 return data.to_csv(name)
 
-    def excel_output(self, func):
-        data = func()
+    def excel_output(self, func, cleaning=1):
+        if cleaning == 0:
+            data = func()
+        else:
+            data = self.df_cleaning(func)
         if data is not None:
             namel = self.ticker_list + [self.start_date, self.end_date]
-            name = '_'.join(namel) + func.__name__ + ".xlsx"
+            name = '_'.join(namel) + "_" + func.__name__ + ".xlsx"
             if not data.empty:
                 return data.to_excel(name)
-
-# nasdaq_tickers = stock_data.get_stocks_by_index('NASDAQ 100')  # Corrected index name
-
-# Print the ticker symbols
-# for stock in nasdaq_tickers:
-#     print(stock['symbol'])
-# all_ticker_getter_names = list(filter(
-#    lambda x: (
-#          x.endswith('_google_tickers') or x.endswith('_yahoo_tickers')
-#    ),
-#    dir(stock_data),
-# ))
-
-# print(all_ticker_getter_names)
-# print(stock_data.get_dow_jones_london_yahoo_tickers())
