@@ -43,35 +43,16 @@ class Index(YfInput):
         # Returns:
         # - List of Stock objects
         # - Symbol of index
-        if self.symbol == '^GSPC':
-            tickers = pd.read_html(
-                'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-            ticklist = tickers.Symbol.tolist()
-            return [Stock(_) for _ in ticklist]
-        elif self.symbol == '^DJI':
-            tickers = pd.read_html(
-                'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average')[1]
-            ticklist = tickers.Symbol.tolist()
-            return [Stock(_) for _ in ticklist]
-        elif self.symbol == '^OEX':
-            tickers = pd.read_html(
-                'https://en.wikipedia.org/wiki/S%26P_100')[2]
-            ticklist = tickers.Symbol.tolist()
-            return [Stock(_) for _ in ticklist]
-        elif self.symbol == '^FCHI':
-            # df = pd.read_html('https://www.bnains.org/archives/action.php/')[0]['Code ISIN'].squeeze()
-            # ISIN_list= df.to_list()
-            #
-            # tick_list=[yq.search(_)["quotes"][0]["symbol"] for _ in ISIN_list]
-            # vtickers = pd.read_html('https://fr.wikipedia.org/wiki/CAC_40')[2].iloc[:, 1].to_list()
-            cac40_tickers = ['AC.PA', 'AI.PA', 'AIR.PA', 'MT.AS', 'CS.PA', 'BNP.PA', 'EN.PA', 'CAP.PA', 'CA.PA',
-                             'ACA.PA', 'BN.PA',
-                             'DSY.PA', 'EDEN.PA', 'ENGI.PA', 'EL.PA', 'ERF.PA', 'RMS.PA', 'KER.PA', 'LR.PA', 'OR.PA',
-                             'MC.PA',
-                             'ML.PA', 'ORA.PA', 'RI.PA', 'PUB.PA', 'RNO.PA', 'SAF.PA', 'SGO.PA', 'SAN.PA', 'SU.PA',
-                             'GLE.PA',
-                             'STLAP.PA', 'STMPA.PA', 'TEP.PA', 'HO.PA', 'TTE.PA', 'URW.PA', 'VIE.PA', 'DG.PA', 'VIV.PA']
-            return [Stock(_) for _ in cac40_tickers]
+        global index_components
+        if self.symbol in index_components:
+            index_info = index_components[self.symbol]
+            if isinstance(index_info, tuple):
+                tickers = pd.read_html(
+                    index_info[0])[index_info[1]]
+                ticklist = tickers.Symbol.tolist()
+                return [Stock(_) for _ in ticklist]
+            elif isinstance(index_info, list):
+                return [Stock(_) for _ in index_info]
         else:
             return self.symbol
 
@@ -148,10 +129,14 @@ class Option(YfInput):
         super().__init__(symbol)
         self.expiration_dates = self.yf_ticker.options
         try:
-            self.currency=self.yf_ticker.option_chain()[-1]['currency']
+            self.currency = self.yf_ticker.info['currency']
         except:
-            self.currency=None
-
+            self.currency = None
+        self.times_maturity=[]
+        try:
+            self.underlying = self.yf_ticker.history(start= (datetime.datetime.today()-datetime.timedelta(days=1)).strftime('%Y-%m-%d')).Close.iloc[0]
+        except:
+            self.underlying = None
 
     def options_expiration(self):
         if len(self.expiration_dates) == 0:
@@ -162,41 +147,69 @@ class Option(YfInput):
                 opt_chain = self.yf_ticker.option_chain(exp_date)
                 calls = opt_chain.calls
                 puts = opt_chain.puts
-                calls.set_index('strike',inplace=True)
-                puts.set_index('strike',inplace=True)
+                calls.set_index('strike', inplace=True)
+                puts.set_index('strike', inplace=True)
 
                 # ! Check calculation
-                time_to_mat=(datetime.datetime.strptime(exp_date,"%Y-%m-%d") - datetime.datetime.today()).total_seconds() / (24 * 60 * 60) / 365
+                time_to_mat = (datetime.datetime.strptime(exp_date,
+                                                          "%Y-%m-%d") - datetime.datetime.today()).total_seconds() / (
+                                          24 * 60 * 60) / 365
+
+                self.times_maturity.append(time_to_mat)
 
                 # Add optionType column
                 # calls['optionType'] = 'C'
                 # puts['optionType'] = 'P'
 
                 # Merge calls and puts into a single dataframe
-                options = pd.concat(objs=[calls, puts],axis=1,keys=['Call','Put'],)
+                options = pd.concat(objs=[calls, puts], axis=1, keys=['Call', 'Put'], )
                 options.drop(
-                    columns=list(itertools.product(['Call', 'Put'], ['contractSize', 'currency', 'change', 'percentChange', 'lastTradeDate',
-                                             'lastPrice'])),
-                    inplace = True)
+                    columns=list(itertools.product(['Call', 'Put'],
+                                                   ['contractSize', 'currency', 'change', 'percentChange',
+                                                    'lastTradeDate',
+                                                    'lastPrice'])),
+                    inplace=True)
                 options['expirationDate'] = exp_date
                 options['expirationDate'] = pd.to_datetime(options['expirationDate'])
 
                 # ! Check calculation
                 options['timeToMaturity'] = (options[
-                                                    'expirationDate'] - pd.Timestamp.today().normalize()).dt.days / 365
-                options.columns = pd.MultiIndex.from_tuples([(time_to_mat, ) + _ for _ in options.columns])
+                                                 'expirationDate'] - pd.Timestamp.today().normalize()).dt.days / 365
+                options.columns = pd.MultiIndex.from_tuples([(time_to_mat,) + _ for _ in options.columns])
                 df_list.append(options)
-            options_df = pd.concat(df_list,axis=1)
+            options_df = pd.concat(df_list, axis=1)
             options_df.sort_index(inplace=True)
             return options_df
 
     def risk_free_rate(self):
+        global risk_free_rate_sources
         if self.currency is not None:
-            if self.currency=='USD':
-                pass
+            if self.currency in risk_free_rate_sources:
+                rate_info=risk_free_rate_sources[self.currency]
+                if isinstance(rate_info,str):
+                    rfr = pdr.DataReader(rate_info, "fred").iloc[-1,0]
+                    self.rfr=rfr
+                    return rfr
+
 
     def arbitrage_conditions(self):
-        pass
+        self.risk_free_rate()
+        df=self.options_expiration()
+        df = df.dropna(how='all', axis=1)
+        df = df.dropna(how='all', axis=0)
+        for time_to in self.times_maturity:
+            # print(df[time_to])
+            df[time_to,'parity','']=self.underlying - df.index * np.exp(-self.rfr * time_to)
+
+            # ! Change 'price' to correct column
+            # df.loc[max(0,df[time_to, 'parity','']) > df[time_to,'Call','price'] | df[time_to,'Call','price']> self.underlying] = np.nan
+            # df.loc[min(0, df[time_to, 'parity', '']) > df[time_to, 'Put', 'price'] | df[
+                # time_to, 'Put', 'price'] > - df[time_to,'parity',''] + self.underlying] = np.nan
+
+            # First partial derivatives
+
+            # Second partial derivatives
+        return df
 
 
 class DataToFormat:
@@ -211,7 +224,7 @@ class DataToFormat:
         self.indices = [_ for _ in self.ticker_types if isinstance(_, Index)]
 
     def __str__(self):
-        return f"{self.ticker_str} data between {self.start_date} and {self.end_date}"
+        return f'{self.ticker_str} data between {self.start_date} and {self.end_date}'
 
     def pandas_tickers(self, text_out=1):
         # Return data of inputted tickers only

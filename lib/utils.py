@@ -3,13 +3,38 @@ import requests
 import datetime
 import itertools
 
-
 import pandas as pd
+import pandas_datareader as pdr
 import numpy as np
 import matplotlib.pyplot as plt
 
 import yfinance as yf
 
+index_components = {'^GSPC': ('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', 0),
+                    '^DJI': ('https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average', 1),
+                    '^OEX': ('https://en.wikipedia.org/wiki/S%26P_100', 2),
+                    '^FCHI': ['AC.PA', 'AI.PA', 'AIR.PA', 'MT.AS', 'CS.PA', 'BNP.PA', 'EN.PA', 'CAP.PA', 'CA.PA',
+                              'ACA.PA', 'BN.PA',
+                              'DSY.PA', 'EDEN.PA', 'ENGI.PA', 'EL.PA', 'ERF.PA', 'RMS.PA', 'KER.PA', 'LR.PA', 'OR.PA',
+                              'MC.PA',
+                              'ML.PA', 'ORA.PA', 'RI.PA', 'PUB.PA', 'RNO.PA', 'SAF.PA', 'SGO.PA', 'SAN.PA', 'SU.PA',
+                              'GLE.PA',
+                              'STLAP.PA', 'STMPA.PA', 'TEP.PA', 'HO.PA', 'TTE.PA', 'URW.PA', 'VIE.PA', 'DG.PA',
+                              'VIV.PA']}
+
+# Alternative for CAC40
+# df = pd.read_html('https://www.bnains.org/archives/action.php/')[0]['Code ISIN'].squeeze()
+# ISIN_list= df.to_list()
+#
+# tick_list=[yq.search(_)["quotes"][0]["symbol"] for _ in ISIN_list]
+# vtickers = pd.read_html('https://fr.wikipedia.org/wiki/CAC_40')[2].iloc[:, 1].to_list()
+
+risk_free_rate_sources= { 'EUR' : 'IRLTLT01EZM156N',
+                          'USD' : 'IRLTLT01USM156N'}
+
+# Alternative for EUR
+# 'EUR': ('https://www.ecb.europa.eu/stats/financial_markets_and_interest_rates/euro_short-term_rate/html/index.en.html',0 ,(0,1))
+# pd.read_html('https://www.ecb.europa.eu/stats/financial_markets_and_interest_rates/euro_short-term_rate/html/index.en.html')[0].loc[0,1])
 
 def date_formatter(date):
     datelist = re.findall("[0-9]+", date)
