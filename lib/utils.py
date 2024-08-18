@@ -8,7 +8,7 @@ import pandas_datareader as pdr
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
-from scipy.interpolate import PchipInterpolator
+from scipy.interpolate import PchipInterpolator, griddata
 
 import yfinance as yf
 from pytickersymbols import PyTickerSymbols

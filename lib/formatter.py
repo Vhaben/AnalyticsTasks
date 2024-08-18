@@ -133,7 +133,7 @@ class Option(YfInput):
         self.strikes_list = []
         try:
             self.underlying = self.yf_ticker.history(
-                start=(datetime.datetime.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')).Close.iloc[0]
+                start=(datetime.datetime.today() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')).Close.iloc[0]
         except:
             self.underlying = None
 
@@ -142,22 +142,40 @@ class Option(YfInput):
             return None
         else:
             df_list = []
+            calls_df_data = {'strike': [], 'timeToMat': [], 'markPrice': []}
+            puts_df_data = {'strike': [], 'timeToMat': [], 'markPrice': []}
             for exp_date in self.expiration_dates:
+                # Get option data from YFinance API (opt_chain is a list of dataframes)
                 opt_chain = self.yf_ticker.option_chain(exp_date)
+
+                # Get DataFrame for calls and puts
                 calls = opt_chain.calls
                 puts = opt_chain.puts
-                calls.set_index('strike', inplace=True)
-                puts.set_index('strike', inplace=True)
+
+                # Calculate market price as average
                 calls['markPrice'] = (calls['bid'] + calls['ask']) / 2
                 puts['markPrice'] = (puts['bid'] + puts['ask']) / 2
 
-                # ! Check calculation
+                # Calculate time to maturity in years: to second accuracy until midnight of expiration date
                 time_to_mat = (datetime.datetime.strptime(exp_date,
                                                           "%Y-%m-%d") - datetime.datetime.today()).total_seconds() / (
                                       24 * 60 * 60) / 360
                 self.times_maturity.append(time_to_mat)
 
-                # Merge calls and puts into a single dataframe
+                # Append market price and corresponding strike to dictionary for DataFrame
+                calls_df_data['markPrice'] += calls['markPrice'].tolist()
+                calls_df_data['strike'] += calls['strike'].tolist()
+                calls_df_data['timeToMat'] += [time_to_mat] * len(calls['strike'])
+                puts_df_data['markPrice'] += puts['markPrice'].tolist()
+                puts_df_data['strike'] += puts['strike'].tolist()
+                puts_df_data['timeToMat'] += [time_to_mat] * len(puts['strike'])
+
+                # Set index as strike to create 2D DataFrame
+                calls.set_index('strike', inplace=True)
+                puts.set_index('strike', inplace=True)
+
+                # Format 2D DataFrame
+                # Merge calls and puts into a single dataframe with MultiIndex: level 0 for 'Call' and 'Put'; level 1 for subitems, e.g. 'markPrice'
                 options = pd.concat(objs=[calls, puts], axis=1, keys=['Call', 'Put'], )
                 options.drop(
                     columns=list(itertools.product(['Call', 'Put'],
@@ -168,21 +186,34 @@ class Option(YfInput):
                 options['expirationDate'] = exp_date
                 options['expirationDate'] = pd.to_datetime(options['expirationDate'])
 
+                # Add level 0 of MultiIndex: time to maturity
                 options.columns = pd.MultiIndex.from_tuples([(time_to_mat,) + _ for _ in options.columns])
                 df_list.append(options)
-            options_df = pd.concat(df_list, axis=1)
-            options_df.sort_index(inplace=True)
-            self.strikes_list = options_df.index.values
-            return options_df
+            # Define 1D DataFrames for calls and puts
+            calls_df_1d = pd.DataFrame(calls_df_data)
+            puts_df_1d = pd.DataFrame(puts_df_data)
+
+            # Define 2D DatFrame for calls and puts: strikes increase in rows; times to expiration increase along columns
+            options_df_2d = pd.concat(df_list, axis=1)
+            options_df_2d.sort_index(inplace=True)
+            self.strikes_list = options_df_2d.index.values
+            return options_df_2d, calls_df_1d, puts_df_1d
 
     def arbitrage_conditions(self):
-        df = self.options_expiration()
+        df, calls_df_1d, puts_df_1d = self.options_expiration()
         df = df.dropna(how='all', axis=1)
         df = df.dropna(how='all', axis=0)
+
+        # Put-Call parity bounds for equality (plus or minus epsilon currency)
         epsilon = 3
         strike_index = df.index
         strike_delta_series = strike_index.to_series().diff()
+
+        # Lists of market prices with arbitrable values removed
+        calls_markPrice_rem = []
+        puts_markPrice_rem = []
         for time_to in self.times_maturity:
+            # Define new DataFrame to avoid warnings about appending too many columns to existing DataFrame df
             extra_data = pd.DataFrame(index=strike_index)
             extra_data[time_to, 'parity', ''] = self.underlying - strike_index * np.exp(-self.rfr * time_to)
             extra_data[time_to, 'delta', ''] = df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice']
@@ -194,6 +225,7 @@ class Option(YfInput):
             extra_data[time_to, 'Call', 'D2'] = extra_data[time_to, 'Call', 'D1'].diff() / strike_delta_series
             extra_data[time_to, 'Put', 'D2'] = extra_data[time_to, 'Put', 'D1'].diff() / strike_delta_series
 
+            # Append calculated data back to original DataFrame
             df = pd.concat([df, extra_data], axis=1)
 
             # Put-Call parity
@@ -205,11 +237,16 @@ class Option(YfInput):
                     df[time_to, 'Call', 'markPrice'] > self.underlying), (time_to, 'Call', 'markPrice')] = np.nan
             df.loc[(np.minimum(0, df[time_to, 'parity', '']) > df[time_to, 'Put', 'markPrice']) |
                    (df[time_to, 'Put', 'markPrice'] > - df[time_to, 'parity', ''] + self.underlying), (
-            time_to, 'Put', 'markPrice')] = np.nan
+                time_to, 'Put', 'markPrice')] = np.nan
 
             # Convexity
             df.loc[df[time_to, 'Call', 'D2'] < 0, (time_to, 'Call', 'markPrice')] = np.nan
             df.loc[df[time_to, 'Put', 'D2'] < 0, (time_to, 'Put', 'markPrice')] = np.nan
+
+            # Remove arbitrable values from 1D DataFrames for calls and puts
+            # Find indices that weren't removed by checking have a contract symbol
+            calls_markPrice_rem += df.loc[df[time_to,'Call', 'contractSymbol'].notna(), (time_to, 'Call', 'markPrice')].tolist()
+            puts_markPrice_rem += df.loc[df[time_to,'Put', 'contractSymbol'].notna(), (time_to, 'Put', 'markPrice')].tolist()
 
             # Interpolation by Piecewise Cubic Hermite Interpolating Polynomial (PCHIP): 1D monotonic
             mask_calls = ~np.isnan(df[time_to, 'Call', 'markPrice'].values)
@@ -235,7 +272,11 @@ class Option(YfInput):
             # extra_data2[time_to, 'parity2', ''] = self.underlying - strike_index * np.exp(-self.rfr * time_to)
             # extra_data2[time_to, 'delta2', ''] = df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice']
             # df = pd.concat([df, extra_data2], axis=1)
-        return df
+        # Redefine 1D DataFrames for calls and puts with only no-arbitrable values
+        calls_df_1d['noArbitrage'] = calls_markPrice_rem
+        puts_df_1d['noArbitrage'] = puts_markPrice_rem
+
+        return df, calls_df_1d, puts_df_1d
 
 
 class DataToFormat:
