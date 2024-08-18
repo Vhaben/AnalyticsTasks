@@ -1,7 +1,4 @@
-import pandas as pd
 import yahooquery as yq
-from pytickersymbols import PyTickerSymbols
-from scipy import interpolate
 
 import logging
 
@@ -10,9 +7,6 @@ logger.disabled = True
 logger.propagate = False
 
 from utils import *
-
-stock_data = PyTickerSymbols()
-listed_indices = stock_data.get_all_indices()
 
 
 class YfInput:
@@ -130,11 +124,16 @@ class Option(YfInput):
         self.expiration_dates = self.yf_ticker.options
         try:
             self.currency = self.yf_ticker.info['currency']
+            if self.currency in rf_currencies:
+                self.rfr = rf_currencies[self.currency] / 100
         except:
             self.currency = None
-        self.times_maturity=[]
+            self.rfr = None
+        self.times_maturity = []
+        self.strikes_list = []
         try:
-            self.underlying = self.yf_ticker.history(start= (datetime.datetime.today()-datetime.timedelta(days=1)).strftime('%Y-%m-%d')).Close.iloc[0]
+            self.underlying = self.yf_ticker.history(
+                start=(datetime.datetime.today() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')).Close.iloc[0]
         except:
             self.underlying = None
 
@@ -149,17 +148,14 @@ class Option(YfInput):
                 puts = opt_chain.puts
                 calls.set_index('strike', inplace=True)
                 puts.set_index('strike', inplace=True)
+                calls['markPrice'] = (calls['bid'] + calls['ask']) / 2
+                puts['markPrice'] = (puts['bid'] + puts['ask']) / 2
 
                 # ! Check calculation
                 time_to_mat = (datetime.datetime.strptime(exp_date,
                                                           "%Y-%m-%d") - datetime.datetime.today()).total_seconds() / (
-                                          24 * 60 * 60) / 365
-
+                                      24 * 60 * 60) / 360
                 self.times_maturity.append(time_to_mat)
-
-                # Add optionType column
-                # calls['optionType'] = 'C'
-                # puts['optionType'] = 'P'
 
                 # Merge calls and puts into a single dataframe
                 options = pd.concat(objs=[calls, puts], axis=1, keys=['Call', 'Put'], )
@@ -167,48 +163,78 @@ class Option(YfInput):
                     columns=list(itertools.product(['Call', 'Put'],
                                                    ['contractSize', 'currency', 'change', 'percentChange',
                                                     'lastTradeDate',
-                                                    'lastPrice'])),
+                                                    'lastPrice', 'openInterest', 'inTheMoney'])),
                     inplace=True)
                 options['expirationDate'] = exp_date
                 options['expirationDate'] = pd.to_datetime(options['expirationDate'])
 
-                # ! Check calculation
-                options['timeToMaturity'] = (options[
-                                                 'expirationDate'] - pd.Timestamp.today().normalize()).dt.days / 365
                 options.columns = pd.MultiIndex.from_tuples([(time_to_mat,) + _ for _ in options.columns])
                 df_list.append(options)
             options_df = pd.concat(df_list, axis=1)
             options_df.sort_index(inplace=True)
+            self.strikes_list = options_df.index.values
             return options_df
 
-    def risk_free_rate(self):
-        global risk_free_rate_sources
-        if self.currency is not None:
-            if self.currency in risk_free_rate_sources:
-                rate_info=risk_free_rate_sources[self.currency]
-                if isinstance(rate_info,str):
-                    rfr = pdr.DataReader(rate_info, "fred").iloc[-1,0]
-                    self.rfr=rfr
-                    return rfr
-
-
     def arbitrage_conditions(self):
-        self.risk_free_rate()
-        df=self.options_expiration()
+        df = self.options_expiration()
         df = df.dropna(how='all', axis=1)
         df = df.dropna(how='all', axis=0)
+        epsilon = 3
+        strike_index = df.index
+        strike_delta_series = strike_index.to_series().diff()
         for time_to in self.times_maturity:
-            # print(df[time_to])
-            df[time_to,'parity','']=self.underlying - df.index * np.exp(-self.rfr * time_to)
-
-            # ! Change 'price' to correct column
-            # df.loc[max(0,df[time_to, 'parity','']) > df[time_to,'Call','price'] | df[time_to,'Call','price']> self.underlying] = np.nan
-            # df.loc[min(0, df[time_to, 'parity', '']) > df[time_to, 'Put', 'price'] | df[
-                # time_to, 'Put', 'price'] > - df[time_to,'parity',''] + self.underlying] = np.nan
+            extra_data = pd.DataFrame(index=strike_index)
+            extra_data[time_to, 'parity', ''] = self.underlying - strike_index * np.exp(-self.rfr * time_to)
+            extra_data[time_to, 'delta', ''] = df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice']
 
             # First partial derivatives
-
+            extra_data[time_to, 'Call', 'D1'] = df[time_to, 'Call', 'markPrice'].diff() / strike_delta_series
+            extra_data[time_to, 'Put', 'D1'] = df[time_to, 'Put', 'markPrice'].diff() / strike_delta_series
             # Second partial derivatives
+            extra_data[time_to, 'Call', 'D2'] = extra_data[time_to, 'Call', 'D1'].diff() / strike_delta_series
+            extra_data[time_to, 'Put', 'D2'] = extra_data[time_to, 'Put', 'D1'].diff() / strike_delta_series
+
+            df = pd.concat([df, extra_data], axis=1)
+
+            # Put-Call parity
+            df.loc[(df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice'] - df[
+                time_to, 'parity', '']).abs() > epsilon, (time_to, 'Call', 'markPrice')] = np.nan
+
+            # Bounds on vanilla options
+            df.loc[(np.maximum(0, df[time_to, 'parity', '']) > df[time_to, 'Call', 'markPrice']) | (
+                    df[time_to, 'Call', 'markPrice'] > self.underlying), (time_to, 'Call', 'markPrice')] = np.nan
+            df.loc[(np.minimum(0, df[time_to, 'parity', '']) > df[time_to, 'Put', 'markPrice']) |
+                   (df[time_to, 'Put', 'markPrice'] > - df[time_to, 'parity', ''] + self.underlying), (
+            time_to, 'Put', 'markPrice')] = np.nan
+
+            # Convexity
+            df.loc[df[time_to, 'Call', 'D2'] < 0, (time_to, 'Call', 'markPrice')] = np.nan
+            df.loc[df[time_to, 'Put', 'D2'] < 0, (time_to, 'Put', 'markPrice')] = np.nan
+
+            # Interpolation by Piecewise Cubic Hermite Interpolating Polynomial (PCHIP): 1D monotonic
+            mask_calls = ~np.isnan(df[time_to, 'Call', 'markPrice'].values)
+            if sum(mask_calls) > 1:
+                monotonic_interpol = PchipInterpolator(self.strikes_list[mask_calls],
+                                                       df[time_to, 'Call', 'markPrice'].values[mask_calls])
+                calls = monotonic_interpol(self.strikes_list)
+                # Enforce convexity
+                result = minimize(lambda p: np.sum((calls.ravel() - p) ** 2), calls.ravel(), bounds=((0, None),),
+                                  constraints={'type': 'ineq', 'fun': convexity_constraint})
+                df[time_to, 'Call', 'markPrice'] = result.x.reshape(calls.shape)
+
+            mask_puts = ~np.isnan(df[time_to, 'Put', 'markPrice'].values)
+            if sum(mask_puts) > 1:
+                monotonic_interpol = PchipInterpolator(self.strikes_list[mask_puts],
+                                                       df[time_to, 'Put', 'markPrice'].values[mask_puts])
+                puts = monotonic_interpol(self.strikes_list)
+                result = minimize(lambda p: np.sum((puts.ravel() - p) ** 2), puts.ravel(), bounds=((0, None),),
+                                  constraints={'type': 'ineq', 'fun': convexity_constraint})
+                df[time_to, 'Put', 'markPrice'] = result.x.reshape(puts.shape)
+
+            # extra_data2 = pd.DataFrame(index=strike_index)
+            # extra_data2[time_to, 'parity2', ''] = self.underlying - strike_index * np.exp(-self.rfr * time_to)
+            # extra_data2[time_to, 'delta2', ''] = df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice']
+            # df = pd.concat([df, extra_data2], axis=1)
         return df
 
 

@@ -7,8 +7,14 @@ import pandas as pd
 import pandas_datareader as pdr
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+from scipy.interpolate import PchipInterpolator
 
 import yfinance as yf
+from pytickersymbols import PyTickerSymbols
+
+stock_data = PyTickerSymbols()
+listed_indices = stock_data.get_all_indices()
 
 index_components = {'^GSPC': ('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', 0),
                     '^DJI': ('https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average', 1),
@@ -29,12 +35,35 @@ index_components = {'^GSPC': ('https://en.wikipedia.org/wiki/List_of_S%26P_500_c
 # tick_list=[yq.search(_)["quotes"][0]["symbol"] for _ in ISIN_list]
 # vtickers = pd.read_html('https://fr.wikipedia.org/wiki/CAC_40')[2].iloc[:, 1].to_list()
 
-risk_free_rate_sources= { 'EUR' : 'IRLTLT01EZM156N',
-                          'USD' : 'IRLTLT01USM156N'}
+risk_free_rate_sources = {'EUR': (
+    'https://www.ecb.europa.eu/stats/financial_markets_and_interest_rates/euro_short-term_rate/html/index.en.html', 0,
+    (0, 1)),
+    'USD': 'SOFR'}
+
 
 # Alternative for EUR
-# 'EUR': ('https://www.ecb.europa.eu/stats/financial_markets_and_interest_rates/euro_short-term_rate/html/index.en.html',0 ,(0,1))
-# pd.read_html('https://www.ecb.europa.eu/stats/financial_markets_and_interest_rates/euro_short-term_rate/html/index.en.html')[0].loc[0,1])
+# 'EUR' :  'ECBESTRVOLWGTTRMDMNRT
+
+def risk_free_rates():
+    rates = {}
+    global risk_free_rate_sources
+    for currency in risk_free_rate_sources:
+        currency_info = risk_free_rate_sources[currency]
+        if isinstance(currency_info, str):
+            rfr = pdr.DataReader(currency_info, "fred").iloc[-1, 0]
+            rates[currency] = rfr
+        elif isinstance(currency_info, tuple):
+            rfr = pd.read_html(currency_info[0])[currency_info[1]].loc[currency_info[2]]
+            rates[currency] = rfr
+    return rates
+
+
+rf_currencies = risk_free_rates()
+
+
+def convexity_constraint(params):
+    return np.diff(params, n=2)
+
 
 def date_formatter(date):
     datelist = re.findall("[0-9]+", date)
