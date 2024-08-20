@@ -65,6 +65,13 @@ def convexity_constraint(params):
     return np.diff(params, n=2)
 
 
+def parity_minimization(call_puts, spot_strike):
+    n = len(spot_strike)
+    calls = call_puts[:n]
+    puts = call_puts[n:]
+    return np.sum(calls - puts - spot_strike)
+
+
 def date_formatter(date):
     datelist = re.findall("[0-9]+", date)
     if len(datelist) != 3 or (len(datelist[0]) != 4 and len(datelist[2]) != 4):

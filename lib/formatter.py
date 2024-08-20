@@ -200,12 +200,16 @@ class Option(YfInput):
             return options_df_2d, calls_df_1d, puts_df_1d
 
     def arbitrage_conditions(self):
+        # Cleans sourced data in DataFrames by removing arbitrable values (checks no-arbitrage conditions)
+        # Input: from options_expiration method
+        # Output: 3 cleaned DataFrames; can be passed for interpolation to interp_noArb method
         df, calls_df_1d, puts_df_1d = self.options_expiration()
         df = df.dropna(how='all', axis=1)
         df = df.dropna(how='all', axis=0)
 
         # Put-Call parity bounds for equality (plus or minus epsilon currency)
-        epsilon = 3
+        epsilon = 0.05  # Put-call parity within epsilon fraction of spot price
+        delta = epsilon * self.underlying
         strike_index = df.index
         strike_delta_series = strike_index.to_series().diff()
 
@@ -216,7 +220,7 @@ class Option(YfInput):
             # Define new DataFrame to avoid warnings about appending too many columns to existing DataFrame df
             extra_data = pd.DataFrame(index=strike_index)
             extra_data[time_to, 'parity', ''] = self.underlying - strike_index * np.exp(-self.rfr * time_to)
-            extra_data[time_to, 'delta', ''] = df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice']
+            # extra_data[time_to, 'delta', ''] = df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice']
 
             # First partial derivatives
             extra_data[time_to, 'Call', 'D1'] = df[time_to, 'Call', 'markPrice'].diff() / strike_delta_series
@@ -230,7 +234,7 @@ class Option(YfInput):
 
             # Put-Call parity
             df.loc[(df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice'] - df[
-                time_to, 'parity', '']).abs() > epsilon, (time_to, 'Call', 'markPrice')] = np.nan
+                time_to, 'parity', '']).abs() > delta, (time_to, 'Call', 'markPrice')] = np.nan
 
             # Bounds on vanilla options
             df.loc[(np.maximum(0, df[time_to, 'parity', '']) > df[time_to, 'Call', 'markPrice']) | (
@@ -245,38 +249,107 @@ class Option(YfInput):
 
             # Remove arbitrable values from 1D DataFrames for calls and puts
             # Find indices that weren't removed by checking have a contract symbol
-            calls_markPrice_rem += df.loc[df[time_to,'Call', 'contractSymbol'].notna(), (time_to, 'Call', 'markPrice')].tolist()
-            puts_markPrice_rem += df.loc[df[time_to,'Put', 'contractSymbol'].notna(), (time_to, 'Put', 'markPrice')].tolist()
+            calls_markPrice_rem += df.loc[
+                df[time_to, 'Call', 'contractSymbol'].notna(), (time_to, 'Call', 'markPrice')].tolist()
+            puts_markPrice_rem += df.loc[
+                df[time_to, 'Put', 'contractSymbol'].notna(), (time_to, 'Put', 'markPrice')].tolist()
 
-            # Interpolation by Piecewise Cubic Hermite Interpolating Polynomial (PCHIP): 1D monotonic
-            mask_calls = ~np.isnan(df[time_to, 'Call', 'markPrice'].values)
-            if sum(mask_calls) > 1:
-                monotonic_interpol = PchipInterpolator(self.strikes_list[mask_calls],
-                                                       df[time_to, 'Call', 'markPrice'].values[mask_calls])
-                calls = monotonic_interpol(self.strikes_list)
-                # Enforce convexity
-                result = minimize(lambda p: np.sum((calls.ravel() - p) ** 2), calls.ravel(), bounds=((0, None),),
-                                  constraints={'type': 'ineq', 'fun': convexity_constraint})
-                df[time_to, 'Call', 'markPrice'] = result.x.reshape(calls.shape)
-
-            mask_puts = ~np.isnan(df[time_to, 'Put', 'markPrice'].values)
-            if sum(mask_puts) > 1:
-                monotonic_interpol = PchipInterpolator(self.strikes_list[mask_puts],
-                                                       df[time_to, 'Put', 'markPrice'].values[mask_puts])
-                puts = monotonic_interpol(self.strikes_list)
-                result = minimize(lambda p: np.sum((puts.ravel() - p) ** 2), puts.ravel(), bounds=((0, None),),
-                                  constraints={'type': 'ineq', 'fun': convexity_constraint})
-                df[time_to, 'Put', 'markPrice'] = result.x.reshape(puts.shape)
-
-            # extra_data2 = pd.DataFrame(index=strike_index)
-            # extra_data2[time_to, 'parity2', ''] = self.underlying - strike_index * np.exp(-self.rfr * time_to)
-            # extra_data2[time_to, 'delta2', ''] = df[time_to, 'Call', 'markPrice'] - df[time_to, 'Put', 'markPrice']
-            # df = pd.concat([df, extra_data2], axis=1)
         # Redefine 1D DataFrames for calls and puts with only no-arbitrable values
         calls_df_1d['noArbitrage'] = calls_markPrice_rem
         puts_df_1d['noArbitrage'] = puts_markPrice_rem
 
         return df, calls_df_1d, puts_df_1d
+
+    def interp_noArb(self, method=1):
+        # Interpolate option surface
+        # Input: 3 cleaned DataFrames, i.e. DataFrames with arbitrable values replaced by NaN, i.e. output of arbitrage_conditions method
+        # Output: returns interpolated values of option surface such that respect no-arbitrage conditions
+
+        df, calls_df_1d, puts_df_1d = self.arbitrage_conditions()
+        # df = df.dropna(how='all', axis=1)
+        # df = df.dropna(how='all', axis=0)
+
+        # Put-Call parity bounds for equality (plus or minus epsilon currency)
+        epsilon = 0.05
+        delta = epsilon * self.underlying
+
+        strike_index = df.index
+        strike_delta_series = strike_index.to_series().diff()
+        if method == 1:
+            # Interpolation by Piecewise Cubic Hermite Interpolating Polynomial (PCHIP) + constraints by minimisation: 1D monotonic
+            for time_to in self.times_maturity:
+                interp = 0
+
+                mask_calls = ~np.isnan(df[time_to, 'Call', 'markPrice'].values)
+                if sum(mask_calls) > 1:
+                    interp += 1
+
+                    monotonic_interpol = PchipInterpolator(self.strikes_list[mask_calls],
+                                                           df[time_to, 'Call', 'markPrice'].values[mask_calls])
+                    calls = monotonic_interpol(self.strikes_list)
+
+                mask_puts = ~np.isnan(df[time_to, 'Put', 'markPrice'].values)
+                if sum(mask_puts) > 1:
+                    interp += 1
+
+                    monotonic_interpol = PchipInterpolator(self.strikes_list[mask_puts],
+                                                           df[time_to, 'Put', 'markPrice'].values[mask_puts])
+                    puts = monotonic_interpol(self.strikes_list)
+
+
+        else:
+            # Interpolation by piecewise cubic, continuously differentiable (C1), and approximately curvature-minimizing polynomial surface (CloughTocher2DInterpolator) of grid of strikes and times to maturity for no-arbitrage call prices
+
+            # Calls
+            mask_calls = ~np.isnan(calls_df_1d['noArbitrage'].values)
+
+            # Coordinates of points at which to evaluate
+            strikes_times_mat_tuples = list(itertools.product(self.strikes_list, self.times_maturity))
+
+            calls_markPrice_interped = griddata(
+                (calls_df_1d['strike'][mask_calls].tolist(), calls_df_1d['timeToMat'][mask_calls].tolist()),
+                calls_df_1d['noArbitrage'][mask_calls].tolist(), strikes_times_mat_tuples, method='cubic')
+
+            # Puts
+            mask_puts = ~np.isnan(puts_df_1d['noArbitrage'].values)
+
+            puts_markPrice_interped = griddata(
+                (puts_df_1d['strike'][mask_puts].tolist(), puts_df_1d['timeToMat'][mask_puts].tolist()),
+                puts_df_1d['noArbitrage'][mask_puts].tolist(), strikes_times_mat_tuples, method='cubic')
+
+            n_times = len(self.strikes_list)
+            for i, time_to in enumerate(self.times_maturity):
+                df[time_to, 'Call', 'markPrice'] = calls_markPrice_interped[i * n_times:(i + 1) * n_times]
+                df[time_to, 'Put', 'markPrice'] = puts_markPrice_interped[i * n_times:(i + 1) * n_times]
+            interp = 2
+
+        if interp == 2:
+            # Impose non-arbitrage constraints by minimisation
+
+            for time_to in self.times_maturity:
+                pc_parity = (self.underlying - strike_index * np.exp(-self.rfr * time_to))
+
+                # Bounds on vanilla options
+                lower_call = np.maximum(0, pc_parity)
+                bounds_call = tuple(itertools.product(lower_call, [float(self.underlying)]))
+
+                lower_put = np.minimum(0, pc_parity)
+                upper_put = self.underlying - pc_parity
+                bounds_put = tuple(zip(lower_put, upper_put))
+
+                bounds = bounds_call + bounds_put
+
+                # Retrieve interpolated values
+                calls = df[time_to, 'Call', 'markPrice']
+                puts = df[time_to, 'Put', 'markPrice']
+
+                # Minimize delta from put-call parity while enforcing convexity
+                result = minimize(parity_minimization, np.concatenate((calls, puts)), bounds=bounds,
+                                  args=pc_parity.values,
+                                  constraints={'type': 'ineq', 'fun': convexity_constraint})
+                df[time_to, 'Call', 'markPrice'] = result.x[:len(calls)]
+                df[time_to, 'Put', 'markPrice'] = result.x[len(calls):]
+            return df
 
 
 class DataToFormat:
