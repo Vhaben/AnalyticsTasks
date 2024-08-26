@@ -15,7 +15,7 @@ def main():
 
     apl = Option('AAPL')
     # a, b, c = apl.arbitrage_conditions()
-    apl.interp_noArb().to_excel('AAPL_interp.xlsx')
+    apl.interp_noArb(method=2).to_excel('AAPL_interp_constraints.xlsx')
     # print(d)
     # apl.arbitrage_conditions().to_excel('AAPL_options.xlsx')
 

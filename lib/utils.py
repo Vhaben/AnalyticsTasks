@@ -60,16 +60,22 @@ def risk_free_rates():
 
 rf_currencies = risk_free_rates()
 
+def convexity_constraint(params,num_calls):
+    return int(not (np.all(np.diff(params[:num_calls], n=2)>0) and np.all(np.diff(params[num_calls:], n=2)>0)))
 
-def convexity_constraint(params):
-    return np.diff(params, n=2)
-
+def monoticity_constraint(params,num_calls):
+    return int(not (np.all(np.diff(params[:num_calls], n=1) < 0) and np.all(np.diff(params[num_calls:], n=1) > 0)))
 
 def parity_minimization(call_puts, spot_strike):
     n = len(spot_strike)
     calls = call_puts[:n]
     puts = call_puts[n:]
-    return np.sum(calls - puts - spot_strike)
+    return np.sqrt(np.mean((calls - puts - spot_strike)) ** 2)
+    # return np.sum((calls - puts - spot_strike)**2)
+
+def parity_min_with_SQ(trial,spot_strike,interped):
+    # return parity_minimization(trial,spot_strike) + np.sum((trial - interped)**2)
+    return parity_minimization(trial,spot_strike) + np.sqrt(np.mean((trial - interped)) ** 2)
 
 
 def date_formatter(date):

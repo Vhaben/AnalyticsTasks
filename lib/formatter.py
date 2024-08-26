@@ -136,6 +136,7 @@ class Option(YfInput):
                 start=(datetime.datetime.today() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')).Close.iloc[0]
         except:
             self.underlying = None
+        self.epsilon = 0.05 # Put-call parity within epsilon fraction of spot price
 
     def options_expiration(self):
         if len(self.expiration_dates) == 0:
@@ -208,8 +209,7 @@ class Option(YfInput):
         df = df.dropna(how='all', axis=0)
 
         # Put-Call parity bounds for equality (plus or minus epsilon currency)
-        epsilon = 0.05  # Put-call parity within epsilon fraction of spot price
-        delta = epsilon * self.underlying
+        delta = self.epsilon * self.underlying
         strike_index = df.index
         strike_delta_series = strike_index.to_series().diff()
 
@@ -270,10 +270,10 @@ class Option(YfInput):
         # df = df.dropna(how='all', axis=0)
 
         # Put-Call parity bounds for equality (plus or minus epsilon currency)
-        epsilon = 0.05
-        delta = epsilon * self.underlying
+        delta = self.epsilon * self.underlying
 
         strike_index = df.index
+        n_calls=len(strike_index)
         strike_delta_series = strike_index.to_series().diff()
         if method == 1:
             # Interpolation by Piecewise Cubic Hermite Interpolating Polynomial (PCHIP) + constraints by minimisation: 1D monotonic
@@ -287,6 +287,7 @@ class Option(YfInput):
                     monotonic_interpol = PchipInterpolator(self.strikes_list[mask_calls],
                                                            df[time_to, 'Call', 'markPrice'].values[mask_calls])
                     calls = monotonic_interpol(self.strikes_list)
+                    df[time_to, 'Call', 'markPrice']=calls
 
                 mask_puts = ~np.isnan(df[time_to, 'Put', 'markPrice'].values)
                 if sum(mask_puts) > 1:
@@ -295,6 +296,7 @@ class Option(YfInput):
                     monotonic_interpol = PchipInterpolator(self.strikes_list[mask_puts],
                                                            df[time_to, 'Put', 'markPrice'].values[mask_puts])
                     puts = monotonic_interpol(self.strikes_list)
+                    df[time_to, 'Put', 'markPrice'] = puts
 
 
         else:
@@ -322,8 +324,9 @@ class Option(YfInput):
                 df[time_to, 'Call', 'markPrice'] = calls_markPrice_interped[i * n_times:(i + 1) * n_times]
                 df[time_to, 'Put', 'markPrice'] = puts_markPrice_interped[i * n_times:(i + 1) * n_times]
             interp = 2
+            return df
 
-        if interp == 2:
+        if interp == 2: #If there are values to be interpolated
             # Impose non-arbitrage constraints by minimisation
 
             for time_to in self.times_maturity:
@@ -342,11 +345,17 @@ class Option(YfInput):
                 # Retrieve interpolated values
                 calls = df[time_to, 'Call', 'markPrice']
                 puts = df[time_to, 'Put', 'markPrice']
+                calls_puts=np.concatenate((calls, puts))
 
-                # Minimize delta from put-call parity while enforcing convexity
-                result = minimize(parity_minimization, np.concatenate((calls, puts)), bounds=bounds,
-                                  args=pc_parity.values,
-                                  constraints={'type': 'ineq', 'fun': convexity_constraint})
+                #Convexity and monoticity constraints
+                deriv_constraint=[{'type': 'eq', 'fun': convexity_constraint, 'args':(n_calls,)}, {'type': 'eq', 'fun': monoticity_constraint, 'args': (n_calls,)} ]
+
+                # Minimize delta from put-call parity while enforcing convexity and bounds
+                result = minimize(parity_min_with_SQ , calls_puts, bounds=bounds,
+                                  args=(pc_parity.values,calls_puts),
+                                  constraints=deriv_constraint
+                                  # method="cobyla"
+                                  )
                 df[time_to, 'Call', 'markPrice'] = result.x[:len(calls)]
                 df[time_to, 'Put', 'markPrice'] = result.x[len(calls):]
             return df
