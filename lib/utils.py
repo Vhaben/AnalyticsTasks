@@ -1,6 +1,7 @@
 import re
 import requests
 import datetime
+import pytz
 import itertools
 
 import pandas as pd
@@ -8,13 +9,23 @@ import pandas_datareader as pdr
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
-from scipy.interpolate import PchipInterpolator, griddata
+from scipy import interpolate
 
 import yfinance as yf
+import yahooquery as yq
 from pytickersymbols import PyTickerSymbols
+
+import logging
+
+logger = logging.getLogger('yfinance')
+logger.disabled = True
+logger.propagate = False
 
 stock_data = PyTickerSymbols()
 listed_indices = stock_data.get_all_indices()
+
+# Timezone offset from UTC for option time to maturity calculation (assuming end of day)
+timezone_offset = {'EUR': 'Europe/Paris', 'USD': 'America/New_York'}
 
 index_components = {'^GSPC': ('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', 0),
                     '^DJI': ('https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average', 1),
@@ -60,22 +71,125 @@ def risk_free_rates():
 
 rf_currencies = risk_free_rates()
 
-def convexity_constraint(params,num_calls):
-    return int(not (np.all(np.diff(params[:num_calls], n=2)>0) and np.all(np.diff(params[num_calls:], n=2)>0)))
 
-def monoticity_constraint(params,num_calls):
+def convexity_constraint(params, num_calls):
+    # Convexity constraint for optimization after interpolation (not together) for Option.interp_noArb method
+    return int(not (np.all(np.diff(params[:num_calls], n=2) > 0) and np.all(np.diff(params[num_calls:], n=2) > 0)))
+
+
+def monoticity_constraint(params, num_calls):
+    # Monotonicity constraint for optimization after interpolation (not together) for Option.interp_noArb method
     return int(not (np.all(np.diff(params[:num_calls], n=1) < 0) and np.all(np.diff(params[num_calls:], n=1) > 0)))
 
+
 def parity_minimization(call_puts, spot_strike):
+    # Objective function for minimization of put-call parity by mean squared error for Option.interp_noArb method
+    # - call_puts: list of (interpolated) calls and puts
+    # - spot_strike: list of put-call parity values for all strikes and times-to-maturity
     n = len(spot_strike)
     calls = call_puts[:n]
     puts = call_puts[n:]
-    return np.sqrt(np.mean((calls - puts - spot_strike)) ** 2)
-    # return np.sum((calls - puts - spot_strike)**2)
+    return np.mean((calls - puts - spot_strike) ** 2)
 
-def parity_min_with_SQ(trial,spot_strike,interped):
-    # return parity_minimization(trial,spot_strike) + np.sum((trial - interped)**2)
-    return parity_minimization(trial,spot_strike) + np.sqrt(np.mean((trial - interped)) ** 2)
+
+def parity_min_with_interp(trial, spot_strike, interped):
+    # Objective function for minimization of put-call parity and mean squared error between interpolated values and new values for Option.interp_noArb method
+    # - trial: list of (interpolated) calls and puts
+    # - spot_strike: list of put-call parity values for all strikes and times-to-maturity
+    # - interped: interpolated values of calls and puts
+    return parity_minimization(trial, spot_strike) + np.mean((trial - interped) ** 2)
+
+
+def spline_convexity(coefficients, n_call, all_strikes, all_times, valid_call_coordinates, valid_put_coordinates,
+                     tck_call, tck_put):
+    # Convexity constraint for iterative optimization of spline coefficients for Option.spline_interp method
+    # - coefficients: coefficients of spline of call and put
+    # - n_call: number of coefficients in coefficients list for call spline (rest are for put spline)
+    # - all_strikes: list of all strikes (x-coordinate of points at which spline is evaluated)
+    # - all_times: list of all times (y-coordinate of points at which spline is evaluated)
+    # - valid_call_coordinates: 1D strike-time coordinates mask of calls that were not removed as not arbitrable
+    # - valid_put_coordinates: 1D strike-time coordinates mask of puts that were not removed as not arbitrable
+    # - tck_call: list output from interpolate.bisplrep with knots on calls; needed to calculate derivatives at the non-arbitrable points using interpolate.bisplev
+    # - tck_put: list output from interpolate.bisplrep with knots on puts; needed to calculate derivatives at the non-arbitrable points using interpolate.bisplev
+
+    # Current coefficients
+    new_tck_calls = tck_call[0:2] + [coefficients[:n_call]] + tck_call[3:]
+    new_tck_puts = tck_put[0:2] + [coefficients[n_call:]] + tck_put[3:]
+
+    # Convexity as second-derivative along strike axis
+    d2z_dx2_calls = interpolate.bisplev(all_strikes, all_times, new_tck_calls, dx=2, dy=0)
+    d2z_dx2_puts = interpolate.bisplev(all_strikes, all_times, new_tck_puts, dx=2, dy=0)
+
+    # Flatten along each column i.e. time-to-maturity first
+    return min(np.min(np.ravel(d2z_dx2_calls,order='F')[valid_call_coordinates]), np.min(np.ravel(d2z_dx2_puts,order='F')[valid_put_coordinates]))
+
+
+def bounds_vanilla_constraint(coefficients, n_call, all_strikes, all_times, call_bounds, put_bounds, tck_call, tck_put):
+    # Convexity constraint for iterative optimization of spline coefficients for Option.spline_interp method
+    # - coefficients: coefficients of spline of call and put
+    # - n_call: number of coefficients in coefficients list for call spline (rest are for put spline)
+    # - all_strikes: list of all strikes (x-coordinate of points at which spline is evaluated)
+    # - all_times: list of all times (y-coordinate of points at which spline is evaluated)
+    # - call_bounds: list of tuples of lower and upper bounds on call prices
+    # - put_bounds: list of tuples of lower and upper bounds on put prices
+    # - tck_call: list output from interpolate.bisplrep with knots on calls; needed to calculate derivatives at the non-arbitrable points using interpolate.bisplev
+    # - tck_put: list output from interpolate.bisplrep with knots on puts; needed to calculate derivatives at the non-arbitrable points using interpolate.bisplev
+
+    # Current coefficients
+    new_tck_calls = tck_call[0:2] + [coefficients[:n_call]] + tck_call[3:]
+    new_tck_puts = tck_put[0:2] + [coefficients[n_call:]] + tck_put[3:]
+
+    # Newly calculated values at every grid point
+    all_interp_calls = interpolate.bisplev(all_strikes, all_times, new_tck_calls)
+    all_interp_puts = interpolate.bisplev(all_strikes, all_times, new_tck_puts)
+
+    # Flatten along each column i.e. time-to-maturity first
+    raveled_calls = all_interp_calls.ravel(order='F')
+    raveled_puts = all_interp_puts.ravel(order='F')
+
+    for strike_time in range(len(raveled_calls)):
+        if ((not call_bounds[strike_time][0] < raveled_calls[strike_time] < call_bounds[strike_time][1])
+                or (not put_bounds[strike_time][0] < raveled_puts[strike_time] < put_bounds[strike_time][1])):
+            return -1
+    return 1
+
+
+def optimal_spline(coefficients, n_call, all_strikes, all_times, valid_call_coordinates, valid_put_coordinates,
+        valid_call_prices, valid_put_prices, parity, tck_call, tck_put):
+    # Objective function for iterative optimization of spline coefficients for Option.spline_interp method
+    # - coefficients: coefficients of spline of call and put
+    # - n_call: number of coefficients in coefficients list for call spline (rest are for put spline)
+    # - all_strikes: list of all strikes (x-coordinate of points at which spline is evaluated)
+    # - all_times: list of all times (y-coordinate of points at which spline is evaluated)
+    # - valid_call_coordinates: 1D strike-time coordinates mask of calls that were not removed as not arbitrable
+    # - valid_put_coordinates: 1D strike-time coordinates mask of puts that were not removed as not arbitrable
+    # - valid_call_prices: 2D grid of original (not removed) arbitrage-free call prices
+    # - valid_put_prices: 2D grid of original (not removed) arbitrage-free
+    # - parity: list of put-call parity expected values (difference of put-call prices from which should be minimised)
+    # - tck_call: list output from interpolate.bisplrep with knots on calls; needed to calculate derivatives at the non-arbitrable points using interpolate.bisplev
+    # - tck_put: list output from interpolate.bisplrep with knots on puts; needed to calculate derivatives at the non-arbitrable points using interpolate.bisplev
+
+    # Current coefficients
+    new_tck_calls = tck_call[0:2] + [coefficients[:n_call]] + tck_call[3:]
+    new_tck_puts = tck_put[0:2] + [coefficients[n_call:]] + tck_put[3:]
+
+    # Newly calculated values at every grid point
+    all_interp_calls = interpolate.bisplev(all_strikes, all_times, new_tck_calls)
+    all_interp_puts = interpolate.bisplev(all_strikes, all_times, new_tck_puts)
+
+    # Flatten along each column i.e. time-to-maturity first
+    raveled_calls = all_interp_calls.ravel(order='F')
+    raveled_puts = all_interp_puts.ravel(order='F')
+
+    # Extract interpolated values for original, arbitrage-free points
+    valid_interp_calls = raveled_calls[valid_call_coordinates]
+    valid_interp_puts = raveled_puts[valid_put_coordinates]
+
+    # Mean-squared error
+    call_difference = np.sum((valid_interp_calls - valid_call_prices) ** 2)
+    put_difference = np.sum((valid_interp_puts - valid_put_prices) ** 2)
+    parity_difference = np.sum((raveled_calls - raveled_puts - parity) ** 2)
+    return call_difference + put_difference + parity_difference
 
 
 def date_formatter(date):
@@ -169,8 +283,8 @@ def user_input():
     return ticker_str, start_date, end_date
 
 
-def csv_input(csv_path, index_stocks=0):
-    # Read the CSV file. The file has multi-level headers, hence header=[0, 1].
+def index_stock_csv_input(csv_path, index_stocks=0):
+    # Read the CSV file. The file has multi-level headers, hence header=list of length the number of levels.
     if index_stocks == 0:
         # If CSV was created to store ticker info only
         header_index = [0, 1]
@@ -197,3 +311,9 @@ def csv_input(csv_path, index_stocks=0):
     # Clear the name of the index to avoid confusion, as it previously referred to the multi-level column names.
     df.index.name = None
     return df
+
+
+def option_excel_input(excel_path):
+    xl = pd.read_excel(excel_path, sheet_name=None)
+    sheets = xl.keys()
+    return xl
