@@ -8,7 +8,7 @@ import pandas as pd
 import pandas_datareader as pdr
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import minimize
+from scipy.optimize import minimize, NonlinearConstraint
 from scipy import interpolate
 
 import yfinance as yf
@@ -121,7 +121,8 @@ def spline_convexity(coefficients, n_call, all_strikes, all_times, valid_call_co
     d2z_dx2_puts = interpolate.bisplev(all_strikes, all_times, new_tck_puts, dx=2, dy=0)
 
     # Flatten along each column i.e. time-to-maturity first
-    return min(np.min(np.ravel(d2z_dx2_calls,order='F')[valid_call_coordinates]), np.min(np.ravel(d2z_dx2_puts,order='F')[valid_put_coordinates]))
+    return min(np.min(np.ravel(d2z_dx2_calls, order='F')[valid_call_coordinates]),
+               np.min(np.ravel(d2z_dx2_puts, order='F')[valid_put_coordinates]))
 
 
 def bounds_vanilla_constraint(coefficients, n_call, all_strikes, all_times, call_bounds, put_bounds, tck_call, tck_put):
@@ -155,7 +156,7 @@ def bounds_vanilla_constraint(coefficients, n_call, all_strikes, all_times, call
 
 
 def optimal_spline(coefficients, n_call, all_strikes, all_times, valid_call_coordinates, valid_put_coordinates,
-        valid_call_prices, valid_put_prices, parity, tck_call, tck_put):
+                   valid_call_prices, valid_put_prices, parity, tck_call, tck_put):
     # Objective function for iterative optimization of spline coefficients for Option.spline_interp method
     # - coefficients: coefficients of spline of call and put
     # - n_call: number of coefficients in coefficients list for call spline (rest are for put spline)
@@ -262,7 +263,22 @@ def yes_no(question="Y/N?"):
     return ans
 
 
-def user_input():
+def valid_input(choices, choice):
+    while choice not in choices:
+        print(f"{choice} not a valid choice.\nChoose one of {choices}.")
+        choice = input()
+    return choice
+
+
+def already_run(function_name, *func_outputs):
+    if all(arg is not None for arg in func_outputs):
+        print(f"Output of function {function_name} already run.\nDo you wish to rerun?")
+        return yes_no()
+    else:
+        return 1
+
+
+def index_stocks_user_input():
     ticker_list, ticker_str = ticker_formatter(input("Input tickers:"))
     print(f"Inputted tickers: {ticker_list}")
     # Can remove ticker validation

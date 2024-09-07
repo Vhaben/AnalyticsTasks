@@ -156,13 +156,17 @@ class Option(YfInput):
             # Convexity
             df.loc[df[time_to, 'Call', 'D2'] < 0, (time_to, 'Call', 'markPrice')] = np.nan
             df.loc[df[time_to, 'Put', 'D2'] < 0, (time_to, 'Put', 'markPrice')] = np.nan
+            # N.B. convexity data cleaning does not remove the entire column of market prices for a given time-to-maturity (which would be more rigorous),
+            # only the values where it isn't convex
 
+            ''' !!! No longer in use
             # Remove arbitrable values from 1D DataFrames for calls and puts
             # Find indices that weren't removed by checking have a contract symbol
             # calls_markPrice_rem += df.loc[
             #     df[time_to, 'Call', 'contractSymbol'].notna(), (time_to, 'Call', 'markPrice')].tolist()
             # puts_markPrice_rem += df.loc[
             #     df[time_to, 'Put', 'contractSymbol'].notna(), (time_to, 'Put', 'markPrice')].tolist()
+            '''
 
             # Append market price and corresponding strike to dictionary for 1D DataFrames
             calls_df_data['noArbitrage'] += df[(time_to, 'Call', 'markPrice')].tolist()
@@ -178,9 +182,11 @@ class Option(YfInput):
         # df = df.dropna(subset=[(_,opt_type,'markPrice') for _ in self.times_maturity for opt_type in ['Call','Put']], how='all', axis=0)
         self.strikes_list = df.index.values
 
+        ''' !!! No longer in use
         # Redefine 1D DataFrames for calls and puts with only arbitrage-free values
         # calls_df_1d['noArbitrage'] = calls_markPrice_rem
         # puts_df_1d['noArbitrage'] = puts_markPrice_rem
+        '''
 
         # Define 1D DataFrames for calls and puts
         calls_df_1d = pd.DataFrame(calls_df_data)
@@ -300,13 +306,19 @@ class Option(YfInput):
         else:
             return None
 
-    def spline_interp(self):
+    def spline_interp(self, interp_method='SLSQP'):
         # Interpolate option surface by optimization: use bicubic spline as initial guess, then adjust coefficients to enforce constraints
         # Input: 3 cleaned DataFrames, i.e. DataFrames with arbitrable values replaced by NaN, i.e. output of arbitrage_conditions method
+        # interp_method: choice of SciPy's optimisation algorithm; valid choices (as require constraints): 'COBYLA', 'COBYQA', 'SLSQP' (default), 'trust-constr'
         # Output: returns interpolated values of option surface such that respect no-arbitrage conditions
 
+        # Check interpolation method is valid
+        chosen_interp_method = valid_input(['COBYLA', 'COBYQA', 'SLSQP', 'trust-constr'], interp_method)
+
+        # Get cleaned DataFrames of option market prices
         df, calls_df_1d, puts_df_1d = self.arbitrage_conditions()
 
+        # Axis info
         strike_index = df.index
         n_strikes = len(self.strikes_list)
         n_times = len(self.times_maturity)
@@ -318,7 +330,8 @@ class Option(YfInput):
         strikes_times_mat_tuples = np.array(list(itertools.product(self.strikes_list, self.times_maturity)))
 
         # Calls
-        mask_calls = ~np.isnan(calls_df_1d['noArbitrage'].values) # Increases in strikes first (increasing rows), then times (columns)
+        mask_calls = ~np.isnan(
+            calls_df_1d['noArbitrage'].values)  # Increases in strikes first (increasing rows), then times (columns)
         valid_call_strikes = calls_df_1d['strike'][mask_calls]
         valid_call_times = calls_df_1d['timeToMat'][mask_calls]
         valid_call_strike_times = np.array(list(
@@ -340,7 +353,8 @@ class Option(YfInput):
         interped_calls = interpolate.bisplev(self.strikes_list, self.times_maturity, tck_calls)
 
         # Puts
-        mask_puts = ~np.isnan(puts_df_1d['noArbitrage'].values) # Increases in strikes first (increasing rows), then times (columns)
+        mask_puts = ~np.isnan(
+            puts_df_1d['noArbitrage'].values)  # Increases in strikes first (increasing rows), then times (columns)
         valid_put_strikes = puts_df_1d['strike'][mask_puts].tolist()
         valid_put_times = puts_df_1d['timeToMat'][mask_puts].tolist()
         valid_put_strike_times = np.array(
@@ -373,22 +387,40 @@ class Option(YfInput):
         upper_put = self.underlying - pc_parity
         bounds_put = tuple(zip(lower_put, upper_put))
 
-        # Constraints definitions
-        constraints = [
-            {'type': 'ineq', 'fun': spline_convexity,
-             'args': (
-             n_call_coeffs, self.strikes_list, self.times_maturity, mask_calls, mask_puts,
-             tck_calls, tck_puts)},
-            {'type': 'ineq', 'fun': bounds_vanilla_constraint,
-             'args': (
-             n_call_coeffs, self.strikes_list, self.times_maturity, bounds_call, bounds_put, tck_calls, tck_puts)}
-        ]
+        # First choices for optimisation algorithm: COBYLA or SLPSQ; both can take a dict of constraints
+        if chosen_interp_method in ['COBYLA', 'SLSQP']:
+
+            # Constraints definitions
+            constraints = [
+                {'type': 'ineq', 'fun': spline_convexity,
+                 'args': (
+                     n_call_coeffs, self.strikes_list, self.times_maturity, mask_calls, mask_puts,
+                     tck_calls, tck_puts)},
+                {'type': 'ineq', 'fun': bounds_vanilla_constraint,
+                 'args': (
+                     n_call_coeffs, self.strikes_list, self.times_maturity, bounds_call, bounds_put, tck_calls,
+                     tck_puts)}
+            ]
+
+        # Second choices for optimisation algorithm: COBYQA or trust-constr; both can take a list of constraints SciPy constraint objects
+        elif chosen_interp_method in ['COBYQA', 'trust-constr']:
+
+            # Constraints definitions (list of SciPy constraint objects)
+            constraints = [NonlinearConstraint(
+                lambda x: spline_convexity(x, n_call_coeffs, self.strikes_list, self.times_maturity, mask_calls,
+                                           mask_puts,
+                                           tck_calls, tck_puts), 0, np.inf),
+                           NonlinearConstraint(lambda x: bounds_vanilla_constraint(x, n_call_coeffs, self.strikes_list,
+                                                                                   self.times_maturity, bounds_call,
+                                                                                   bounds_put, tck_calls,
+                                                                                   tck_puts), 0, np.inf)]
+
 
         # Perform the optimization
         result = minimize(optimal_spline, all_coefs, args=(
-        n_call_coeffs, self.strikes_list, self.times_maturity, mask_calls, mask_puts,
-        valid_call_prices, valid_put_prices, pc_parity, tck_calls, tck_puts),
-                          constraints=constraints,method='COBYQA')
+                n_call_coeffs, self.strikes_list, self.times_maturity, mask_calls, mask_puts,
+                valid_call_prices, valid_put_prices, pc_parity, tck_calls, tck_puts),
+                              constraints=constraints, method=chosen_interp_method)
 
         # Extract the optimized coefficients
         optimized_coefficients = result.x
@@ -400,16 +432,16 @@ class Option(YfInput):
         interped_puts = interpolate.bisplev(self.strikes_list, self.times_maturity, optimized_tck_put)
 
         # Store 2D DataFrames for calls and puts
-        calls_2d = pd.DataFrame(interped_calls,columns=self.times_maturity, index=self.strikes_list)
+        calls_2d = pd.DataFrame(interped_calls, columns=self.times_maturity, index=self.strikes_list)
         puts_2d = pd.DataFrame(interped_puts, columns=self.times_maturity, index=self.strikes_list)
 
         return df, calls_2d, puts_2d
 
-    def excel_output(self, method=0):
+    def excel_output(self, method=0,interpo_method='SLSQP'):
         if method == 1 or method == 2:
             df, calls_2d, puts_2d = self.interp_noArb(method=method)
         else:
-            df, calls_2d, puts_2d = self.spline_interp()
-        with pd.ExcelWriter(self.symbol + '_call_puts_COBYQA' + str(method) + '.xlsx') as writer:
+            df, calls_2d, puts_2d = self.spline_interp(interp_method=interpo_method)
+        with pd.ExcelWriter(self.symbol + '_call_puts_' + interpo_method + str(method) + '.xlsx') as writer:
             calls_2d.to_excel(writer, sheet_name='Calls')
             puts_2d.to_excel(writer, sheet_name='Puts')

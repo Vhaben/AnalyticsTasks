@@ -9,7 +9,7 @@ def main():
     # apl.interp_noArb(method=2).to_excel('AAPL_interp_constraints.xlsx')
     # print(d)
     # apl.arbitrage_conditions().to_excel('AAPL_options.xlsx')
-    apl.excel_output()
+    apl.excel_output(interpo_method='trust-constr')
     pass
 
 
