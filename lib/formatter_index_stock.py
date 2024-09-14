@@ -142,6 +142,8 @@ class DataToFormat:
         self.ticker_data = None
         self.index_components_data = None
         self.interped_data = None
+
+        # Map for functions for Excel output
         self.func_output_map: {DataToFormat.df_cleaning: self.interped_data,
                                DataToFormat.pandas_tickers: self.ticker_data,
                                DataToFormat.pandas_index_components: self.index_components_data}
@@ -245,5 +247,4 @@ class DataToFormat:
             name = '_'.join(
                 self.ticker_list + [self.start_date, self.end_date, 'interped']) + "_" + func.__name__ + ".xlsx"
         if data is not None and not data.empty:
-
             return data.to_excel(name)
