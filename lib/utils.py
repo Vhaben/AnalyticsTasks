@@ -80,7 +80,7 @@ rf_currencies = risk_free_rates()
 
 def rfr_df(start: str, end: str, currency: str) -> DataFrame:
     """
-    Get DataFrame of risk-free rate for a given currency in a given period
+    Get DataFrame of risk-free rate for a given currency in a given period from St. Louis Fed
 
     :param start: start date
     :param end: end date
@@ -97,8 +97,10 @@ def rfr_df(start: str, end: str, currency: str) -> DataFrame:
 
     if isinstance(currency_info, str):
         rates_df = pdr.DataReader(currency_info, "fred", start=start, end=end)
-
-    return rates_df
+        return rates_df
+    else:
+        print("Currency data not found.")
+        raise
 
 
 def date_formatter(date):
