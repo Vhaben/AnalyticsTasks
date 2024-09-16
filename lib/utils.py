@@ -104,7 +104,8 @@ def rfr_df(start: str, end: str, currency: str) -> DataFrame:
 def date_formatter(date):
     datelist = re.findall("[0-9]+", date)
     if len(datelist) != 3 or (len(datelist[0]) != 4 and len(datelist[2]) != 4):
-        return "Invalid date format."
+        print("Invalid date format.")
+        return None
     if len(datelist[0]) == 4:
         date = "-".join(datelist)
     elif len(datelist[2]) == 4:
@@ -112,7 +113,8 @@ def date_formatter(date):
     try:
         datetime.datetime.strptime(date, "%Y-%m-%d")
     except:
-        return "Date numbers invalid."
+        print("Date numbers invalid.")
+        return None
     return date
 
 

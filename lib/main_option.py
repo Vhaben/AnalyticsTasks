@@ -9,23 +9,14 @@ def main():
     # apl.interp_noArb(method=2).to_excel('AAPL_interp_constraints.xlsx')
     # print(d)
     # apl.arbitrage_conditions().to_excel('AAPL_options.xlsx')
-    # apl.excel_output(interpo_method='COBYLA')
+    apl.excel_output(interpo_method='COBYLA', maturity_flag=True)
+    # apl.options_data_dolt('2020-01-01', '2020-01-10')
+    # apl.data_source="DoltHub"
+    # apl.arbitrage_conditions('2020-01-01', '2020-01-10')
 
-    response = requests.get(
-        "https://www.dolthub.com/api/v1alpha1/post-no-preference/options",
-        headers={},
-    )
-    data = response.json()
-    print(data)
-
-    query = '''SELECT * FROM option_chain WHERE act_symbol = 'TSLA' and date = '2021-09-15' and delta > 0.45 and delta < 0.55 limit 200;'''
-    res = requests.get(
-        'https://www.dolthub.com/api/v1alpha1/{}/{}/{}'.format("post-no-preference", "options", "master"),
-        params={'q': query},
-    )
-    data2=res.json()
-    print(data2['rows'])
-    a=pd.DataFrame(data2['rows'])
+    # Fails with '2020-01-01', '2020-01-20' as multiple data points with same strike and same time-to-maturity but different price
+    # apl.interp_noArb('2020-01-01', '2020-01-10')
+    # No interpolation as all values removed as no arbitrage-free data points
     pass
 
 
@@ -45,6 +36,7 @@ def get_option_history_data(contract_symbol, days_before_expiration=30):
     start_date = option_expiration_date - datetime.timedelta(days=days_before_expiration)
     option_history = option.history(start=start_date)
     return option_history
+
 
 def main2(*args):
     # Example:
@@ -70,6 +62,4 @@ def main2(*args):
 
 
 if __name__ == "__main__":
-    # data = end_of_day()
-    # print(data.to_string())
     main()

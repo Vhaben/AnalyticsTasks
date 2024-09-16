@@ -1,3 +1,6 @@
+import pandas as pd
+from pandas import date_range
+
 from formatter_index_stock import *
 
 
@@ -38,8 +41,8 @@ def monoticity_constraint(params, num_calls, opt_type=None):
     if opt_type not in ["vanilla", "vanilla_call", "vanilla_put"]:
         return None
 
-    return int(not (np.all(np.diff(params[:num_calls], n=1) < 0) # Call prices decreasing in strike axis
-                    and np.all(np.diff(params[num_calls:], n=1) > 0))) # Put prices increasing in strike axis
+    return int(not (np.all(np.diff(params[:num_calls], n=1) < 0)  # Call prices decreasing in strike axis
+                    and np.all(np.diff(params[num_calls:], n=1) > 0)))  # Put prices increasing in strike axis
 
 
 def parity_minimization(call_puts, spot_strike, opt_type=None):
@@ -120,7 +123,7 @@ def spline_convexity(coefficients, n_call, all_strikes, all_times, valid_call_co
 
     # Minimum of second derivatives must be positive if convex
     min_convex = min(np.min(np.ravel(d2z_dx2_calls, order='F')[valid_call_coordinates]),
-        np.min(np.ravel(d2z_dx2_puts, order='F')[valid_put_coordinates]))
+                     np.min(np.ravel(d2z_dx2_puts, order='F')[valid_put_coordinates]))
 
     # Monotonicity constraint as first derivative along strike axis
     dz_dx_calls = interpolate.bisplev(all_strikes, all_times, new_tck_calls, dx=1, dy=0)
@@ -132,16 +135,15 @@ def spline_convexity(coefficients, n_call, all_strikes, all_times, valid_call_co
     min_put_dstrike = np.max(np.ravel(dz_dx_puts, order='F')[valid_put_coordinates])
 
     # Calendar spread if chosen: first derivative along time-to-maturity axis
-    if calendar_spread==True:
+    if calendar_spread == True:
         dz_dy_calls = interpolate.bisplev(all_strikes, all_times, new_tck_calls, dx=0, dy=1)
         dz_dy_puts = interpolate.bisplev(all_strikes, all_times, new_tck_puts, dx=0, dy=1)
 
         # Minimum of first derivatives in time must be positive
         min_dtime = min(np.min(np.ravel(dz_dy_calls, order='F')[valid_call_coordinates]),
-                         np.min(np.ravel(dz_dy_puts, order='F')[valid_put_coordinates]))
+                        np.min(np.ravel(dz_dy_puts, order='F')[valid_put_coordinates]))
 
         return min(min_dtime, min_put_dstrike, - max_call_dstrike, min_convex)
-
 
     return min(min_put_dstrike, - max_call_dstrike, min_convex)
 
@@ -238,16 +240,18 @@ def optimal_spline(coefficients, n_call, all_strikes, all_times, valid_call_coor
 
 
 class Option(YfInput):
-    def __init__(self, symbol:str):
+    def __init__(self, symbol: str):
         super().__init__(symbol)
-        self.type_opt = None # Option type
+        self.type_opt = None  # Option type
+
 
 class VanillaOption(Option):
     def __init__(self, symbol: str):
         super().__init__(symbol)
         self.type_opt = "vanilla"
 
-        self.expiration_dates = self.yf_ticker.options
+        self.expiration_dates = self.yf_ticker.options  # Future expiration dates
+
         try:
             self.currency = self.yf_ticker.info['currency']
             if self.currency in rf_currencies:
@@ -258,22 +262,123 @@ class VanillaOption(Option):
             self.currency = None
             self.rfr = None
             self.tzone = None
+
         self.times_maturity = []
         self.strikes_list = []
+
         try:
             self.underlying = self.yf_ticker.history(
                 start=(datetime.datetime.today() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')).Close.iloc[0]
         except:
             self.underlying = None
+
         self.epsilon_parity = 0.05  # Put-call parity within epsilon fraction of spot price
         self.delta = self.epsilon_parity * self.underlying  # Put-call parity bounds for equality (plus or minus epsilon currency)
 
+        self.data_source = ""  # Source of price data: YFinance or DoltHub
 
+    def options_data_dolt(self, start_d: str, end_d: str) -> DataFrame:
+        """
+        Source option price data from DoltHub database using SQL query
+
+        :param start_d: start date of window of option price data
+        :param end_d: end date of window of option price data
+        :return: 2D DataFrame with strikes as index and times-to-maturity as MultiIndex column
+        """
+
+        if self.data_source == "YF":
+            print("Data already sourced from YFinance. Overwritting YFinance data with DoltHub data.")
+        self.data_source = "DoltHub"
+        self.times_maturity = []
+
+        # Format dates to Y-M-D
+        start_d = date_formatter(start_d)
+        end_d = date_formatter(end_d)
+        if start_d is None or end_d is None:
+            print("Invalid dates.")
+
+        # Write SQL query from DoltHub
+        query_date = ""
+        for date_i in pd.date_range(start=start_d, end=end_d):
+            query_date += "date = '" + date_i.to_pydatetime().strftime('%Y-%m-%d') + "' or "
+        query_date = query_date[:-4]
+        query = "SELECT * FROM option_chain WHERE (act_symbol = '" + self.symbol + "') and (" + query_date + ")"
+
+        res = requests.get(
+            'https://www.dolthub.com/api/v1alpha1/{}/{}/{}'.format("post-no-preference", "options", "master"),
+            params={'q': query},
+        )
+        data = res.json()
+        df = pd.DataFrame(data['rows'])
+
+        # Format DataFrame
+        df['expiration'] = pd.to_datetime(df['expiration'])
+        df['date'] = pd.to_datetime(df['date'])
+        df['bid'] = pd.to_numeric(df['bid'])
+        df['ask'] = pd.to_numeric(df['ask'])
+        df['strike'] = pd.to_numeric(df['strike'])
+
+        # Drop expiration dates in the future
+        df.drop(df[df.expiration > pd.Timestamp('today').floor('D')].index, inplace=True)
+
+        # Drop unnecessary data
+        df.drop(columns=['delta','gamma','theta','vega','rho'],inplace=True)
+
+        # Market price as mean of bid and ask
+        df['markPrice'] = (df['bid'] + df['ask']) / 2
+
+        df['time_to_mat'] = (df['expiration'] - df['date'])/ pd.Timedelta('365 days')
+
+        self.times_maturity = sorted(df['time_to_mat'].unique())
+        self.strikes_list = sorted(df['strike'].unique())
+
+        # 2D DataFrame data
+        df_list = []
+
+        for time_to in self.times_maturity:
+            df_time_to_call= df[(df.time_to_mat==time_to) & (df.call_put=='Call')]
+            df_time_to_put = df[(df.time_to_mat==time_to) & (df.call_put=='Put')]
+            # df_time_to_call.columns = pd.MultiIndex.from_tuples([('Call',) + _ for _ in df_time_to_call.columns])
+            # df_time_to_put.columns = pd.MultiIndex.from_tuples([('Put',) + _ for _ in df_time_to_put.columns])
+
+            # Set index as strike to create 2D DataFrame
+            df_time_to_call.set_index('strike', inplace=True)
+            df_time_to_put.set_index('strike', inplace=True)
+
+            # Merge calls and puts into a single dataframe with MultiIndex: level 0 for 'Call' and 'Put'; level 1 for subitems, e.g. 'markPrice'
+            df_time_to = pd.concat(objs=[df_time_to_call, df_time_to_put], axis=1, keys=['Call', 'Put'], )
+
+            # Add level 0 of MultiIndex: time to maturity
+            df_time_to.columns = pd.MultiIndex.from_tuples([(time_to,) + _ for _ in df_time_to.columns])
+            # Format 2D DataFrame
+
+
+            df_list.append(df_time_to)
+
+        '''Testing: multiple data points with same strike and time-to-maturity as different dates'''
+        for dftest in df_list:
+            print(dftest.index.is_unique)
+
+        # Define 2D DataFrame for calls and puts: strikes increase in rows; times to expiration increase along columns
+        options_df_2d = pd.concat(df_list, axis=1)
+        options_df_2d.sort_index(inplace=True)
+        self.strikes_list = options_df_2d.index.values
+        return options_df_2d
 
     def options_expiration(self):
+        """
+        Source option price data from YFinance database for future expiration dates only
+
+        :return: 2D DataFrame with strikes as index and times-to-maturity as MultiIndex column
+        """
         if len(self.expiration_dates) == 0:
             return None
         else:
+            if self.data_source == "DoltHub":
+                print("Data already sourced from DoltHub. Overwritting DoltHub data with YFinance data.")
+            self.data_source = "YF"
+            self.times_maturity = []
+
             # 2D DataFrame data
             df_list = []
 
@@ -293,12 +398,12 @@ class VanillaOption(Option):
                 calls['markPrice'] = (calls['bid'] + calls['ask']) / 2
                 puts['markPrice'] = (puts['bid'] + puts['ask']) / 2
 
-                # Calculate time to maturity in years: to second accuracy until midnight of expiration date
-                time_to_mat = (pytz.timezone("America/New_York").localize(
+                # Calculate time to maturity in years: to second accuracy until midnight of expiration date (add 1 day to expiration to set to end of day)
+                time_to_mat = (pytz.timezone(self.tzone).localize(
                     datetime.datetime.strptime(exp_date, "%Y-%m-%d")
                     + datetime.timedelta(hours=24)
                 )
-                               - datetime.datetime.now(pytz.timezone("America/New_York"))).total_seconds() / (
+                               - datetime.datetime.now(pytz.timezone(self.tzone))).total_seconds() / (
                                       24 * 60 * 60) / 360
 
                 self.times_maturity.append(time_to_mat)
@@ -344,28 +449,34 @@ class VanillaOption(Option):
             options_df_2d.sort_index(inplace=True)
             self.strikes_list = options_df_2d.index.values
 
+            ''' No longer in use
             # Define separate DataFrames with only call and put values
             calls_2d = options_df_2d[[(_, 'Call', 'markPrice') for _ in self.times_maturity]].copy()
             puts_2d = options_df_2d[[(_, 'Put', 'markPrice') for _ in self.times_maturity]].copy()
             calls_2d.columns = self.times_maturity
             puts_2d.columns = self.times_maturity
+            '''
             return options_df_2d
 
-    def arbitrage_conditions(self, maturity_flag=False):
+    def arbitrage_conditions(self, start_date=None,end_date=None):
         """
         Cleans sourced data in DataFrames by removing arbitrable values (checks no-arbitrage conditions); passed for interpolation to interp_noArb method
 
-        Args:
-            DataFrames: automatically inputted from options_expiration method
+        Input:
+            DataFrames: automatically inputted from options_expiration method or options_data_dolt method depending on choice
 
-        :param maturity_flag (bool): optional flag if also want to check calendar spread (derivative in times-to-maturity); default is not to
+        :param start_date: optional argument for start of price window if using DoltHub database for option prices; default is None i.e. using YFinance
+        :param end_date: optional argument for end of price window if using DoltHub database for option prices; default is None i.e. using YFinance
 
         :return:
             DataFrame with all info (calls and puts' original market prices, strikes, etc.)
             DataFrame with calls' cleaned values in 1D
             DataFrame with puts' cleaned values in 1D
         """
-        df = self.options_expiration()
+        if self.data_source == "DoltHub" and start_date is not None and end_date is not None:
+            df = self.options_data_dolt(start_d=start_date, end_d=end_date)
+        else:
+            df = self.options_expiration()
         df = df.dropna(how='all', axis=1)
         df = df.dropna(how='all', axis=0)
 
@@ -451,20 +562,23 @@ class VanillaOption(Option):
 
         return df, calls_df_1d, puts_df_1d
 
-    def interp_noArb(self, method=1, maturity_flag=False):
+    def interp_noArb(self, started=None,ended=None, method=1):
         """
         Interpolates option surface
 
         Automatic input: output of arbitrage_conditions method, i.e. 3 cleaned DataFrames, i.e. DataFrames with arbitrable values replaced by NaN
 
         :param method (int): choice of interpolation method; default of 1 interpolates separately for each time-to-maturity; method 2 interpolates 2D grid at once
-        :param maturity_flag (bool): optional flag if also want to check calendar spread (derivative in times-to-maturity); default is not to
         :return:
             DataFrame with all info (calls and puts' original market prices, strikes, etc.)
             DataFrame with calls' interpolated values of option surface such that respect no-arbitrage conditions
             DataFrame with puts' interpolated values of option surface such that respect no-arbitrage conditions
         """
-        df, calls_df_1d, puts_df_1d = self.arbitrage_conditions()
+        if self.data_source == "DoltHub" and started is not None and ended is not None:
+            df, calls_df_1d, puts_df_1d = self.arbitrage_conditions(start_date=started,end_date=ended)
+        else:
+            df, calls_df_1d, puts_df_1d = self.arbitrage_conditions()
+
         # df = df.dropna(how='all', axis=1)
         # df = df.dropna(how='all', axis=0)
         # Extra columns: ['contractSymbol','bid','ask','volume','impliedVolatility'] ['expirationDate']
@@ -547,8 +661,8 @@ class VanillaOption(Option):
                 calls_puts = np.concatenate((calls, puts))
 
                 # Convexity and monoticity constraints
-                deriv_constraint = [{'type': 'eq', 'fun': convexity_constraint, 'args': (n_calls,self.type_opt)},
-                                    {'type': 'eq', 'fun': monoticity_constraint, 'args': (n_calls,self.type_opt)}]
+                deriv_constraint = [{'type': 'eq', 'fun': convexity_constraint, 'args': (n_calls, self.type_opt)},
+                                    {'type': 'eq', 'fun': monoticity_constraint, 'args': (n_calls, self.type_opt)}]
 
                 # Minimize delta from put-call parity while enforcing convexity and bounds
                 result = minimize(parity_min_with_interp, calls_puts, bounds=bounds,
@@ -572,10 +686,15 @@ class VanillaOption(Option):
             return None
 
     def spline_interp(self, interp_method='SLSQP', calendar_spr=False):
-        # Interpolate option surface by optimization: use bicubic spline as initial guess, then adjust coefficients to enforce constraints
-        # Input: 3 cleaned DataFrames, i.e. DataFrames with arbitrable values replaced by NaN, i.e. output of arbitrage_conditions method
-        # interp_method: choice of SciPy's optimisation algorithm; valid choices (as require constraints): 'COBYLA', 'COBYQA', 'SLSQP' (default), 'trust-constr'
-        # Output: returns interpolated values of option surface such that respect no-arbitrage conditions
+        """
+        Interpolate option surface by optimization: use bicubic spline as initial guess, then adjust coefficients to enforce constraints
+
+        Input: 3 cleaned DataFrames, i.e. DataFrames with arbitrable values replaced by NaN, i.e. output of arbitrage_conditions method
+
+        :param interp_method: choice of SciPy's optimisation algorithm; valid choices (as require constraints): 'COBYLA', 'COBYQA', 'SLSQP' (default), 'trust-constr'
+        :param calendar_spr: optional flag if also want to check calendar spread (derivative in times-to-maturity); default is not to
+        :return: returns interpolated values of option surface such that respect no-arbitrage conditions
+        """
 
         # Check interpolation method is valid
         chosen_interp_method = valid_input(['COBYLA', 'COBYQA', 'SLSQP', 'trust-constr'], interp_method)
@@ -664,7 +783,7 @@ class VanillaOption(Option):
                 {'type': 'ineq', 'fun': bounds_vanilla_constraint,
                  'args': (
                      n_call_coeffs, self.strikes_list, self.times_maturity, bounds_call, bounds_put, tck_calls,
-                     tck_puts,self.type_opt)}
+                     tck_puts, self.type_opt)}
             ]
 
         # Second choices for optimisation algorithm: COBYQA or trust-constr; both can take a list of constraints SciPy constraint objects
@@ -674,16 +793,16 @@ class VanillaOption(Option):
             constraints = [NonlinearConstraint(
                 lambda x: spline_convexity(x, n_call_coeffs, self.strikes_list, self.times_maturity, mask_calls,
                                            mask_puts,
-                                           tck_calls, tck_puts,self.type_opt, calendar_spr), 0, np.inf),
+                                           tck_calls, tck_puts, self.type_opt, calendar_spr), 0, np.inf),
                 NonlinearConstraint(lambda x: bounds_vanilla_constraint(x, n_call_coeffs, self.strikes_list,
                                                                         self.times_maturity, bounds_call,
                                                                         bounds_put, tck_calls,
-                                                                        tck_puts,self.type_opt), 0, np.inf)]
+                                                                        tck_puts, self.type_opt), 0, np.inf)]
 
         # Perform the optimization
         result = minimize(optimal_spline, all_coefs, args=(
             n_call_coeffs, self.strikes_list, self.times_maturity, mask_calls, mask_puts,
-            valid_call_prices, valid_put_prices, pc_parity, tck_calls, tck_puts,self.type_opt),
+            valid_call_prices, valid_put_prices, pc_parity, tck_calls, tck_puts, self.type_opt),
                           constraints=constraints, method=chosen_interp_method)
 
         # Extract the optimized coefficients
@@ -701,11 +820,14 @@ class VanillaOption(Option):
 
         return df, calls_2d, puts_2d
 
-    def excel_output(self, method=0, interpo_method='SLSQP'):
+    def excel_output(self, method=0, interpo_method='SLSQP',maturity_flag=False):
         if method == 1 or method == 2:
             df, calls_2d, puts_2d = self.interp_noArb(method=method)
+            exc_name= self.symbol + '_call_puts_' + interpo_method + str(method) + '.xlsx'
         else:
-            df, calls_2d, puts_2d = self.spline_interp(interp_method=interpo_method)
-        with pd.ExcelWriter(self.symbol + '_call_puts_' + interpo_method + str(method) + '.xlsx') as writer:
+            df, calls_2d, puts_2d = self.spline_interp(interp_method=interpo_method,calendar_spr=maturity_flag)
+            exc_name = self.symbol + '_call_puts_' + interpo_method + '_spline_cal_spr' + str(maturity_flag) + '.xlsx'
+        with pd.ExcelWriter(exc_name) as writer:
             calls_2d.to_excel(writer, sheet_name='Calls')
             puts_2d.to_excel(writer, sheet_name='Puts')
+
